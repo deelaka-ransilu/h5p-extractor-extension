@@ -6,7 +6,13 @@ function log(msg) {
 }
 
 function sanitizeFilename(name) {
-  return (name || 'h5p-content').replace(/[^a-z0-9\-_ ]/gi, '_').slice(0, 80);
+  return (name || 'h5p-content').replace(/[^a-z0-9\-_ ]/gi, '_').slice(0, 100);
+}
+
+function buildBaseName(data) {
+  // weekLabel looks like "Week 01: Introduction to Data Visualization" — convert to "Week 01 - Introduction to..."
+  const source = data.weekLabel || data.title || 'h5p-content';
+  return sanitizeFilename(source.replace(/:\s*/, ' - '));
 }
 
 function buildNotesText(data) {
@@ -40,15 +46,19 @@ function buildNotesText(data) {
   return lines.join('\n');
 }
 
-async function imageUrlToDataUrl(url) {
-  const resp = await fetch(url, { credentials: 'include' });
-  const blob = await resp.blob();
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result);
     reader.onerror = reject;
     reader.readAsDataURL(blob);
   });
+}
+
+async function imageUrlToDataUrl(url) {
+  const resp = await fetch(url, { credentials: 'include' });
+  const blob = await resp.blob();
+  return blobToDataUrl(blob);
 }
 
 function dedupeConsecutive(urls) {
@@ -110,23 +120,27 @@ btn.addEventListener('click', async () => {
 
     log(`Found: ${data.notes.length} note block(s), ${data.quiz.length} question(s), ${data.images.length} image(s).`);
 
-    const zip = new JSZip();
-    zip.file('notes.txt', buildNotesText(data));
+    const baseName = buildBaseName(data);
+    const notesText = buildNotesText(data);
+    const notesUrl = await blobToDataUrl(new Blob([notesText], { type: 'text/plain' }));
+
+    await new Promise((resolve) => {
+      chrome.downloads.download({ url: notesUrl, filename: `${baseName}.txt`, saveAs: false }, () => {
+        log(`Downloaded: ${baseName}.txt`);
+        resolve();
+      });
+    });
 
     if (data.images.length) {
       log('Building slides.pdf (downloading images)…');
       const pdfBlob = await buildSlidesPdf(data.images);
-      zip.file('slides.pdf', pdfBlob);
-    }
-
-    log('Zipping…');
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(zipBlob);
-    const filename = sanitizeFilename(data.title) + '.zip';
-
-    chrome.downloads.download({ url, filename }, () => {
-      log(`Downloaded: ${filename}`);
+      const pdfUrl = await blobToDataUrl(pdfBlob);
+      chrome.downloads.download({ url: pdfUrl, filename: `${baseName}.pdf`, saveAs: false }, () => {
+        log(`Downloaded: ${baseName}.pdf`);
+        btn.disabled = false;
+      });
+    } else {
       btn.disabled = false;
-    });
+    }
   });
 });

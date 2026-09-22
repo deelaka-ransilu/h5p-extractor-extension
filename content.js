@@ -21,6 +21,16 @@ function requestRawData() {
   });
 }
 
+function getWeekLabel() {
+  // Moodle breadcrumb: [... , "ITE3313 - Data Visualization", "Week 01: Introduction to ...", "Week 1 Lecture Materials"]
+  // We want the second-to-last item — the week/topic name — not the generic activity title.
+  const items = document.querySelectorAll('.breadcrumb-item');
+  if (items.length >= 2) {
+    return items[items.length - 2].textContent.trim().replace(/\s+/g, ' ');
+  }
+  return null;
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action !== 'extract') return;
 
@@ -39,7 +49,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     const result = window.H5PExtractor.extractH5PContent(parsed, raw.contentUrl);
-    sendResponse({ title: raw.title, ...result });
+    sendResponse({ title: raw.title, weekLabel: getWeekLabel(), ...result });
   });
 
   return true; // keep the message channel open for the async response above

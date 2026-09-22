@@ -111,6 +111,7 @@ function walk(node, ctx, out) {
 
   // recurse into anything that looks like nested content
   for (const key of Object.keys(actual)) {
+    if (key === 'bookCover') continue; // skip the book's title-slide cover image — not a real slide
     const val = actual[key];
     if (Array.isArray(val)) {
       val.forEach(item => walk(item, ctx, out));
