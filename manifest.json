@@ -3,8 +3,9 @@
   "name": "H5P Weekly Extractor",
   "version": "1.0",
   "description": "Extracts H5P notes + slide images from a CODL Moodle page into a downloadable zip (notes.txt + slides.pdf).",
-  "permissions": ["activeTab", "scripting", "downloads"],
+  "permissions": ["activeTab", "scripting", "downloads", "offscreen"],
   "host_permissions": ["https://online.codl.lk/*"],
+  "background": { "service_worker": "background.js" },
   "action": {
     "default_popup": "popup.html"
   },

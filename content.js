@@ -21,14 +21,15 @@ function requestRawData() {
   });
 }
 
-function getWeekLabel() {
-  // Moodle breadcrumb: [... , "ITE3313 - Data Visualization", "Week 01: Introduction to ...", "Week 1 Lecture Materials"]
-  // We want the second-to-last item — the week/topic name — not the generic activity title.
-  const items = document.querySelectorAll('.breadcrumb-item');
-  if (items.length >= 2) {
-    return items[items.length - 2].textContent.trim().replace(/\s+/g, ' ');
-  }
-  return null;
+function getBreadcrumbInfo() {
+  // Moodle breadcrumb: ["ITE3313-25S2", "ITE3313 - Data Visualization", "Week 01: Introduction to ...", "Week 1 Lecture Materials"]
+  const items = Array.from(document.querySelectorAll('.breadcrumb-item')).map(el =>
+    el.textContent.trim().replace(/\s+/g, ' ')
+  );
+  return {
+    subject: items[0] || null,          // e.g. "ITE3313-25S2"
+    weekLabel: items.length >= 2 ? items[items.length - 2] : null, // e.g. "Week 01: Introduction to ..."
+  };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -49,7 +50,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     const result = window.H5PExtractor.extractH5PContent(parsed, raw.contentUrl);
-    sendResponse({ title: raw.title, weekLabel: getWeekLabel(), ...result });
+    sendResponse({ title: raw.title, ...getBreadcrumbInfo(), ...result });
   });
 
   return true; // keep the message channel open for the async response above
