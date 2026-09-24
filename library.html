@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>H5P Library</title>
+  <link rel="stylesheet" href="ui.css">
+</head>
+<body class="full">
+  <main>
+    <div class="topbar">
+      <div class="brand"><img src="icons/icon48.png" alt=""> H5P Weekly Extractor <span class="muted">· Library</span></div>
+      <div class="muted" id="storageInfo"></div>
+    </div>
+
+    <label class="search">
+      <input id="libSearch" type="search" placeholder="Search weeks or subjects…">
+    </label>
+
+    <div class="panel">
+      <div id="libList"></div>
+    </div>
+
+    <div class="actionbar">
+      <button class="btn danger" id="rmSelBtn" disabled>Remove selected (0)</button>
+      <button class="btn" id="zipAllBtn" disabled>Download all as zip</button>
+      <button class="btn primary" id="zipSelBtn" disabled>Download selected (0)</button>
+    </div>
+
+    <pre id="log" hidden></pre>
+  </main>
+  <script src="icons.js"></script>
+  <script src="library-db.js"></script>
+  <script src="library-ui.js"></script>
+</body>
+</html>

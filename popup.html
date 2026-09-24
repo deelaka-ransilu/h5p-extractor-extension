@@ -1,91 +1,32 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <style>
-    :root {
-      --page: #121212; --card: #1A1A1A; --hover: #202020; --border: #2A2A2A;
-      --ink: #FFFFFF; --ink2: #8A8A8A; --off: #4A4A4A;
-      --brand: #22C801; --brand-hover: #1CA601; --on-brand: #000000; --error: #EF4444;
-    }
-    * { box-sizing: border-box; }
-    body {
-      width: 360px; margin: 0; padding: 16px; background: var(--page); color: var(--ink);
-      font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    }
-    .brand { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
-    .dot.on { background: var(--brand); }
-    button { font: inherit; cursor: pointer; }
-    button:focus-visible, input:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-
-    .tabs { display: flex; gap: 4px; margin-top: 12px; padding: 3px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
-    .tab { flex: 1; padding: 7px; font-size: 13px; font-weight: 600; color: var(--ink2); background: transparent; border: 0; border-radius: 8px; }
-    .tab:hover { color: var(--ink); }
-    .tab.active { color: var(--on-brand); background: var(--brand); }
-
-    .panel { margin-top: 12px; padding: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; }
-    #title { margin: 0; font-size: 14px; font-weight: 600; line-height: 1.3; }
-    #meta { margin: 4px 0 0; font-size: 12px; color: var(--ink2); }
-
-    .primary {
-      width: 100%; margin-top: 12px; padding: 10px 12px; font-size: 14px; font-weight: 600;
-      color: var(--on-brand); background: var(--brand); border: 1px solid var(--brand); border-radius: 8px;
-    }
-    .primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
-    .primary:disabled { background: var(--border); border-color: var(--border); color: var(--off); cursor: not-allowed; }
-    .ghosts { display: flex; gap: 8px; margin-top: 8px; }
-    .ghost {
-      flex: 1; padding: 8px; font-size: 13px; font-weight: 600; color: var(--ink);
-      background: transparent; border: 1px solid var(--border); border-radius: 8px;
-    }
-    .ghost:hover { background: var(--hover); }
-    .ghost:disabled { color: var(--off); cursor: not-allowed; background: transparent; }
-    .ghost.inlib { color: var(--brand); border-color: var(--brand); }
-
-    .toggle { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--ink2); cursor: pointer; }
-    .toggle input { accent-color: var(--brand); width: 14px; height: 14px; }
-
-    #libList { max-height: 270px; overflow-y: auto; margin: -4px; padding: 4px; }
-    .subject { display: flex; align-items: center; justify-content: space-between; margin: 10px 0 6px; font-size: 12px; font-weight: 700; color: var(--ink2); letter-spacing: .03em; }
-    .subject:first-child { margin-top: 0; }
-    .link { background: none; border: 0; padding: 0; font-size: 12px; font-weight: 600; color: var(--brand); }
-    .link:hover { color: var(--brand-hover); }
-    .item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 6px; background: var(--page); border: 1px solid var(--border); border-radius: 10px; }
-    .item:hover { background: var(--hover); }
-    .item input { accent-color: var(--brand); width: 15px; height: 15px; flex-shrink: 0; }
-    .item .text { flex: 1; min-width: 0; }
-    .item .name { font-size: 13px; font-weight: 600; line-height: 1.25; }
-    .item .sub { font-size: 11px; color: var(--ink2); margin-top: 2px; }
-    .remove { background: none; border: 0; color: var(--ink2); font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
-    .remove:hover { color: var(--error); }
-    .empty { margin: 0; font-size: 12px; color: var(--ink2); line-height: 1.4; }
-
-    #log { margin: 10px 0 0; padding: 8px 10px; max-height: 110px; overflow-y: auto; font-size: 11px; color: var(--ink2);
-      white-space: pre-wrap; background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
-    #log.error { color: var(--error); }
-    [hidden] { display: none !important; }
-  </style>
+  <link rel="stylesheet" href="ui.css">
+  <style>body { width: 360px; padding: 16px; }</style>
 </head>
 <body>
-  <div class="brand"><span class="dot" id="dot"></span> H5P Weekly Extractor</div>
+  <div class="topbar">
+    <div class="brand"><img src="icons/icon48.png" alt=""> H5P Weekly Extractor</div>
+    <button class="icon-btn" id="openLibBtn" title="Open the full library in a new tab"></button>
+  </div>
 
   <div class="tabs" role="tablist">
     <button class="tab active" id="tabPage" role="tab">This page</button>
-    <button class="tab" id="tabLib" role="tab">Library</button>
+    <button class="tab" id="tabLib" role="tab">Library <span data-lib-count></span></button>
   </div>
 
   <div id="viewPage">
     <div class="panel">
-      <p id="title">Checking this page…</p>
+      <div style="display:flex;align-items:center;gap:8px"><span class="dot" id="dot"></span><p id="title" style="flex:1">Checking this page…</p></div>
       <p id="meta"></p>
-      <button class="primary" id="bothBtn" disabled>Download notes + slides</button>
-      <div class="ghosts">
-        <button class="ghost" id="txtBtn" disabled>Notes .txt</button>
-        <button class="ghost" id="pdfBtn" disabled>Slides .pdf</button>
+      <button class="btn primary wide" id="bothBtn" style="margin-top:12px;padding:10px 12px;font-size:14px" disabled>Download notes + slides</button>
+      <div class="row-btns">
+        <button class="btn" id="txtBtn" disabled>Notes .txt</button>
+        <button class="btn" id="pdfBtn" disabled>Slides .pdf</button>
       </div>
-      <div class="ghosts">
-        <button class="ghost" id="addBtn" disabled>+ Add to library</button>
+      <div class="row-btns">
+        <button class="btn" id="addBtn" disabled>Add to library</button>
       </div>
     </div>
     <label class="toggle">
@@ -97,15 +38,18 @@
   <div id="viewLib" hidden>
     <div class="panel">
       <div id="libList"></div>
-      <button class="primary" id="zipSelBtn" disabled>Download selected (0)</button>
-      <div class="ghosts">
-        <button class="ghost" id="zipAllBtn" disabled>Download all as zip</button>
+      <button class="btn primary wide" id="zipSelBtn" style="margin-top:12px" disabled>Download selected (0)</button>
+      <div class="row-btns">
+        <button class="btn" id="zipAllBtn" disabled>Download all</button>
+        <button class="btn" id="rmSelBtn" disabled>Remove selected (0)</button>
       </div>
     </div>
   </div>
 
   <pre id="log" hidden></pre>
+  <script src="icons.js"></script>
   <script src="library-db.js"></script>
+  <script src="library-ui.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

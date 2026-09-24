@@ -69,6 +69,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     toOffscreen({ action: 'offscreen-library-add', key: msg.key || msg.data.key, data: msg.data, tabId });
   }
 
+  // Open (or focus) the full-page library
+  if (msg.action === 'open-library') {
+    const url = chrome.runtime.getURL('library.html');
+    chrome.tabs.query({ url }).then((tabs) => {
+      if (tabs && tabs.length) {
+        chrome.tabs.update(tabs[0].id, { active: true });
+        chrome.windows.update(tabs[0].windowId, { focused: true });
+      } else {
+        chrome.tabs.create({ url });
+      }
+    }).catch(() => chrome.tabs.create({ url }));
+  }
+
   // Zip up library items and download
   if (msg.action === 'library-zip') {
     toOffscreen({ action: 'offscreen-zip', items: msg.items, zipName: msg.zipName });

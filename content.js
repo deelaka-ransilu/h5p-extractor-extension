@@ -117,41 +117,86 @@ function safeSend(message) {
 
 /* ---------------- floating card (Shadow DOM) ---------------- */
 
+const ICON_PATHS = {
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+  file: '<path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+  slides: '<path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
+  check: '<path d="M20 6 9 17l-5-5"/>',
+  x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  library: '<path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/>',
+};
+
+function ic(name, size) {
+  const doc = new DOMParser().parseFromString(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name] || ''}</svg>`,
+    'image/svg+xml'
+  );
+  const span = document.createElement('span');
+  span.className = 'ico';
+  span.appendChild(document.importNode(doc.documentElement, true));
+  return span;
+}
+
+function setBtn(btn, name, label) {
+  btn.textContent = '';
+  if (name) btn.appendChild(ic(name, 15));
+  if (label != null && label !== '') btn.appendChild(document.createTextNode(label));
+}
+
+// @font-face has to live in the page's own document (not inside the shadow root)
+function ensureFont() {
+  if (document.getElementById('h5px-font')) return;
+  try {
+    const s = document.createElement('style');
+    s.id = 'h5px-font';
+    s.textContent =
+      "@font-face{font-family:'H5PX Space Grotesk';src:url('" +
+      chrome.runtime.getURL('fonts/SpaceGrotesk.woff2') +
+      "') format('woff2');font-weight:300 700;font-display:swap;}";
+    document.head.appendChild(s);
+  } catch (e) {}
+}
+
 const CARD_CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; }
 @keyframes slide-in { from { opacity: 0; transform: translateX(60px); } to { opacity: 1; transform: translateX(0); } }
 .card {
-  position: fixed; right: 20px; bottom: 20px; width: 320px; z-index: 2147483647;
+  position: fixed; right: 20px; bottom: 20px; width: 330px; z-index: 2147483647;
   background: #1A1A1A; color: #FFFFFF; border: 1px solid #2A2A2A; border-radius: 14px;
   padding: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
-  font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family: 'H5PX Space Grotesk', 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
   animation: slide-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+.ico { display: inline-flex; flex-shrink: 0; }
 .head { display: flex; align-items: center; gap: 8px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #22C801; flex-shrink: 0; }
 .kicker { font-size: 12px; color: #8A8A8A; flex: 1; letter-spacing: .02em; }
-.close { background: none; border: 0; color: #8A8A8A; font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; border-radius: 6px; }
-.close:hover { color: #FFFFFF; }
+.close { display: inline-flex; background: none; border: 0; color: #8A8A8A; cursor: pointer; padding: 3px; border-radius: 6px; }
+.close:hover { color: #FFFFFF; background: #202020; }
 .title { margin: 10px 0 2px; font-size: 15px; font-weight: 600; line-height: 1.3; }
 .sub { margin: 0; font-size: 12px; color: #8A8A8A; }
-.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #121212; border: 1px solid #2A2A2A; border-radius: 10px; }
+.row { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #121212; border: 1px solid #2A2A2A; border-radius: 10px; }
 .row:hover { background: #202020; }
+.ib { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; color: #22C801; background: #1A1A1A; border: 1px solid #2A2A2A; border-radius: 8px; }
+.rtext { flex: 1; min-width: 0; }
 .label { font-size: 13px; font-weight: 600; }
 .meta { font-size: 12px; color: #8A8A8A; margin-top: 2px; }
 .meta.err { color: #EF4444; }
 .bar { height: 3px; margin-top: 6px; background: #2A2A2A; border-radius: 2px; overflow: hidden; }
 .fill { height: 100%; width: 0; background: #22C801; transition: width .2s ease; }
-.btn { font: inherit; font-size: 13px; font-weight: 600; color: #FFFFFF; background: transparent; border: 1px solid #2A2A2A; border-radius: 8px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; font: inherit; font-size: 13px; font-weight: 600; color: #FFFFFF; background: transparent; border: 1px solid #2A2A2A; border-radius: 8px; padding: 7px 10px; cursor: pointer; white-space: nowrap; }
 .btn:hover { background: #202020; }
-.btn:focus-visible { outline: 2px solid #22C801; outline-offset: 2px; }
+.btn:focus-visible, .close:focus-visible { outline: 2px solid #22C801; outline-offset: 2px; }
 .btn:disabled { color: #4A4A4A; cursor: not-allowed; }
 .btn.busy { color: #8A8A8A; }
-.wide { width: 100%; margin-top: 8px; padding: 9px 12px; }
 .primary { width: 100%; margin-top: 12px; padding: 10px 12px; color: #000000; background: #22C801; border-color: #22C801; }
 .primary:hover { background: #1CA601; border-color: #1CA601; }
 .primary:disabled { background: #2A2A2A; border-color: #2A2A2A; color: #4A4A4A; }
+.actions { display: flex; gap: 8px; margin-top: 8px; }
+.actions .grow { flex: 1; }
 .inlib { color: #22C801; border-color: #22C801; }
 `;
 
@@ -176,6 +221,8 @@ function showCard(data) {
   const hasSlides = slideCount > 0;
   if (!hasText && !hasSlides) return;
 
+  ensureFont();
+
   hostEl = document.createElement('div');
   hostEl.id = 'h5p-extractor-host';
   const root = hostEl.attachShadow({ mode: 'open' });
@@ -186,8 +233,9 @@ function showCard(data) {
   const card = el('div', 'card');
 
   const head = el('div', 'head');
-  const close = el('button', 'close', '×');
+  const close = el('button', 'close');
   close.setAttribute('aria-label', 'Dismiss');
+  close.appendChild(ic('x', 16));
   close.addEventListener('click', hideCard);
   head.append(el('span', 'dot'), el('span', 'kicker', 'H5P content detected'), close);
   card.appendChild(head);
@@ -205,39 +253,45 @@ function showCard(data) {
 
   if (hasText) {
     const row = el('div', 'row');
-    const left = el('div');
-    left.append(
+    const ib = el('span', 'ib');
+    ib.appendChild(ic('file', 16));
+    const text = el('div', 'rtext');
+    text.append(
       el('div', 'label', 'Notes (.txt)'),
       el('div', 'meta', `${data.notes.length} notes · ${data.quiz.length} questions`)
     );
-    txtBtn = el('button', 'btn', 'Download');
+    txtBtn = el('button', 'btn');
+    setBtn(txtBtn, 'download', 'Download');
     txtBtn.addEventListener('click', () => {
       txtBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'txt', key: data.key, data });
     });
-    row.append(left, txtBtn);
+    row.append(ib, text, txtBtn);
     card.appendChild(row);
   }
 
   if (hasSlides) {
     const row = el('div', 'row');
-    const left = el('div');
-    left.style.flex = '1';
+    const ib = el('span', 'ib');
+    ib.appendChild(ic('slides', 16));
+    const text = el('div', 'rtext');
     pdfMeta = el('div', 'meta', `${slideCount} slides`);
     pdfBar = el('div', 'bar');
     pdfFill = el('div', 'fill');
     pdfBar.appendChild(pdfFill);
-    left.append(el('div', 'label', 'Slides (.pdf)'), pdfMeta, pdfBar);
-    pdfBtn = el('button', 'btn busy', 'Preparing…');
+    text.append(el('div', 'label', 'Slides (.pdf)'), pdfMeta, pdfBar);
+    pdfBtn = el('button', 'btn busy');
+    setBtn(pdfBtn, null, 'Preparing…');
     pdfBtn.addEventListener('click', () => {
       pdfBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'pdf', key: data.key, data });
     });
-    row.append(left, pdfBtn);
+    row.append(ib, text, pdfBtn);
     card.appendChild(row);
   }
 
-  const bothBtn = el('button', 'btn primary', 'Download both');
+  const bothBtn = el('button', 'btn primary');
+  setBtn(bothBtn, 'download', 'Download both');
   if (hasText && hasSlides) {
     bothBtn.addEventListener('click', () => {
       bothBtn.disabled = true;
@@ -248,31 +302,41 @@ function showCard(data) {
     card.appendChild(bothBtn);
   }
 
-  const libBtn = el('button', 'btn wide', '+ Add to library');
+  const actions = el('div', 'actions');
+  const libBtn = el('button', 'btn grow');
+  setBtn(libBtn, 'plus', 'Add to library');
   libBtn.addEventListener('click', () => {
     libBtn.disabled = true;
-    libBtn.textContent = 'Saving…';
+    setBtn(libBtn, null, 'Saving…');
     safeSend({ action: 'library-add', key: data.key, data });
   });
-  card.appendChild(libBtn);
+  const openBtn = el('button', 'btn');
+  openBtn.title = 'Open your library';
+  setBtn(openBtn, 'library', '');
+  openBtn.addEventListener('click', () => safeSend({ action: 'open-library' }));
+  actions.append(libBtn, openBtn);
+  card.appendChild(actions);
 
   root.appendChild(card);
   document.body.appendChild(hostEl);
 
-  function flashSaved(btn, label) {
+  function flashSaved(btn) {
     if (!btn) return;
-    btn.textContent = 'Saved ✓';
+    setBtn(btn, 'check', 'Saved');
     btn.disabled = false;
-    setTimeout(() => { btn.textContent = label; }, 2500);
+    setTimeout(() => setBtn(btn, 'download', 'Download'), 2500);
   }
 
   async function refreshLib() {
     try {
       const { library = {} } = await chrome.storage.local.get('library');
       const saved = !!library[data.id];
-      libBtn.textContent = saved ? 'In library ✓ · click to update' : '+ Add to library';
+      const count = Object.keys(library).length;
+      setBtn(libBtn, saved ? 'check' : 'plus', saved ? 'In library' : 'Add to library');
+      libBtn.title = saved ? 'Click to update this week in your library' : '';
       libBtn.classList.toggle('inlib', saved);
       libBtn.disabled = false;
+      setBtn(openBtn, 'library', count ? String(count) : '');
     } catch (e) {}
   }
 
@@ -283,34 +347,34 @@ function showCard(data) {
         if (msg.state === 'building') {
           const pct = msg.total ? Math.round((msg.done / msg.total) * 100) : 0;
           pdfFill.style.width = pct + '%';
-          pdfBtn.textContent = `Preparing ${msg.done}/${msg.total}`;
+          setBtn(pdfBtn, null, `Preparing ${msg.done}/${msg.total}`);
           pdfBtn.classList.add('busy');
         } else if (msg.state === 'ready') {
           pdfBar.style.display = 'none';
-          pdfBtn.textContent = 'Download';
+          setBtn(pdfBtn, 'download', 'Download');
           pdfBtn.classList.remove('busy');
         } else if (msg.state === 'error') {
           pdfBar.style.display = 'none';
           pdfMeta.textContent = "Couldn't build the PDF";
           pdfMeta.classList.add('err');
-          pdfBtn.textContent = 'Retry';
+          setBtn(pdfBtn, null, 'Retry');
           pdfBtn.classList.remove('busy');
           pdfBtn.disabled = false;
         }
       }
       if (msg.kind === 'saved') {
-        if (msg.which === 'txt') flashSaved(txtBtn, 'Download');
-        if (msg.which === 'pdf') flashSaved(pdfBtn, 'Download');
+        if (msg.which === 'txt') flashSaved(txtBtn);
+        if (msg.which === 'pdf') flashSaved(pdfBtn);
         if (msg.which === 'error') {
           [txtBtn, pdfBtn].forEach((b) => { if (b) b.disabled = false; });
         }
         bothBtn.disabled = false;
       }
       if (msg.kind === 'library') {
-        if (msg.state === 'saving') libBtn.textContent = 'Saving…';
+        if (msg.state === 'saving') setBtn(libBtn, null, 'Saving…');
         if (msg.state === 'saved') refreshLib();
         if (msg.state === 'error') {
-          libBtn.textContent = "Couldn't save · retry";
+          setBtn(libBtn, null, "Couldn't save · retry");
           libBtn.disabled = false;
         }
       }

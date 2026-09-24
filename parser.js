@@ -5,10 +5,13 @@
  * plus the content's base URL (H5PIntegration.contents[cid].contentUrl) for
  * resolving relative image paths.
  *
- * Output: { notes: [...], quiz: [...], images: [...] }
- *   notes  -> plain-text blocks from AdvancedText/Text/Table
- *   quiz   -> { type, question, options: [{text, correct}], subContentId }
- *   images -> absolute URLs of any H5P.Image elements found (slide images etc.)
+ * Output: { notes: [...], quiz: [...], images: [...], slideImages: [...], otherImages: [...] }
+ *   notes       -> plain-text blocks from AdvancedText/Text/Table
+ *   quiz        -> { type, question, options: [{text, correct}], subContentId }
+ *   slideImages -> images found inside an H5P.CoursePresentation (the real slides)
+ *   otherImages -> H5P.Image elements found anywhere else (e.g. lab screenshots in notes)
+ *   images      -> what goes into the PDF: slideImages if the week has a slide deck,
+ *                  otherwise otherImages as a fallback
  */
 
 function stripHtml(html) {
@@ -84,6 +87,10 @@ function walk(node, ctx, out) {
   // subContentId sometimes sits on `actual` itself, sometimes on the wrapper (node)
   const subContentId = actual.subContentId || node.subContentId;
 
+  // Are we inside a Course Presentation (the real slides)?
+  const inSlides = ctx.inSlides || library.startsWith('H5P.CoursePresentation');
+  const childCtx = inSlides === ctx.inSlides ? ctx : { ...ctx, inSlides };
+
   if (library.startsWith('H5P.AdvancedText') || library.startsWith('H5P.Text')) {
     if (params && params.text) out.notes.push(stripHtml(params.text));
   } else if (library.startsWith('H5P.Table')) {
@@ -105,7 +112,9 @@ function walk(node, ctx, out) {
     }
   } else if (library.startsWith('H5P.Image')) {
     if (params && params.file && params.file.path) {
-      out.images.push(resolveImageUrl(params.file.path, ctx.contentUrl));
+      const url = resolveImageUrl(params.file.path, ctx.contentUrl);
+      if (ctx.inSlides) out.slideImages.push(url);
+      else out.otherImages.push(url);
     }
   }
 
@@ -114,9 +123,9 @@ function walk(node, ctx, out) {
     if (key === 'bookCover') continue; // skip the book's title-slide cover image — not a real slide
     const val = actual[key];
     if (Array.isArray(val)) {
-      val.forEach(item => walk(item, ctx, out));
+      val.forEach(item => walk(item, childCtx, out));
     } else if (val && typeof val === 'object') {
-      walk(val, ctx, out);
+      walk(val, childCtx, out);
     }
   }
 }
@@ -126,8 +135,11 @@ function walk(node, ctx, out) {
  * @param {string} contentUrl - contents[cid].contentUrl
  */
 function extractH5PContent(jsonContentParsed, contentUrl) {
-  const out = { notes: [], quiz: [], images: [] };
-  walk(jsonContentParsed, { contentUrl }, out);
+  const out = { notes: [], quiz: [], images: [], slideImages: [], otherImages: [] };
+  walk(jsonContentParsed, { contentUrl, inSlides: false }, out);
+
+  // Slides win. Only fall back to loose images if the week has no slide deck.
+  out.images = out.slideImages.length ? out.slideImages : out.otherImages;
   return out;
 }
 
