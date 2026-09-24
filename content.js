@@ -35,6 +35,45 @@ function getBreadcrumbInfo() {
   };
 }
 
+// If a week has several H5P activities, find which one this is ("Part 2 of 3")
+// by reading the week's section on the course page, in the order Moodle lists them.
+async function getPartInfo(cmid) {
+  try {
+    if (!cmid) return {};
+    const crumbs = document.querySelectorAll('.breadcrumb-item');
+    const weekCrumb = crumbs.length >= 2 ? crumbs[crumbs.length - 2] : null;
+    const anchor = weekCrumb && weekCrumb.querySelector('a');
+    if (!anchor) return {};
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const resp = await fetch(anchor.href, { credentials: 'include', signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!resp.ok) return {};
+
+    const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+    const idRe = new RegExp('[?&]id=' + cmid + '(&|$)');
+    const link = Array.from(doc.querySelectorAll('a[href*="/mod/hvp/view.php"]')).find((a) =>
+      idRe.test(a.getAttribute('href') || '')
+    );
+    if (!link) return {};
+
+    const section = link.closest('li.section, [data-for="section"], .course-section');
+    if (!section) return {};
+
+    const ids = [];
+    section.querySelectorAll('a[href*="/mod/hvp/view.php"]').forEach((a) => {
+      const m = (a.getAttribute('href') || '').match(/[?&]id=(\d+)/);
+      if (m && !ids.includes(m[1])) ids.push(m[1]);
+    });
+    const idx = ids.indexOf(String(cmid));
+    if (idx < 0) return {};
+    return { partIndex: idx + 1, partTotal: ids.length };
+  } catch (e) {
+    return {};
+  }
+}
+
 async function collect() {
   if (cachedData) return cachedData;
 
@@ -49,7 +88,18 @@ async function collect() {
   }
 
   const result = window.H5PExtractor.extractH5PContent(parsed, raw.contentUrl);
-  cachedData = { key: location.href, title: raw.title, ...getBreadcrumbInfo(), ...result };
+  const cmid = new URLSearchParams(location.search).get('id');
+  const part = await getPartInfo(cmid);
+
+  cachedData = {
+    key: location.href,
+    id: cmid ? 'cm' + cmid : location.pathname + location.search,
+    cmid,
+    title: raw.title,
+    ...getBreadcrumbInfo(),
+    ...part,
+    ...result,
+  };
   return cachedData;
 }
 
@@ -98,9 +148,11 @@ const CARD_CSS = `
 .btn:focus-visible { outline: 2px solid #22C801; outline-offset: 2px; }
 .btn:disabled { color: #4A4A4A; cursor: not-allowed; }
 .btn.busy { color: #8A8A8A; }
+.wide { width: 100%; margin-top: 8px; padding: 9px 12px; }
 .primary { width: 100%; margin-top: 12px; padding: 10px 12px; color: #000000; background: #22C801; border-color: #22C801; }
 .primary:hover { background: #1CA601; border-color: #1CA601; }
 .primary:disabled { background: #2A2A2A; border-color: #2A2A2A; color: #4A4A4A; }
+.inlib { color: #22C801; border-color: #22C801; }
 `;
 
 function el(tag, cls, text) {
@@ -141,15 +193,15 @@ function showCard(data) {
   card.appendChild(head);
 
   const weekTitle = data.weekLabel ? data.weekLabel.replace(/:\s*/, ' – ') : data.title;
+  const partText = data.partTotal > 1 ? ` · Part ${data.partIndex} of ${data.partTotal}` : '';
   card.appendChild(el('p', 'title', weekTitle || 'H5P content'));
-  card.appendChild(el('p', 'sub', data.subject || ''));
+  card.appendChild(el('p', 'sub', (data.subject || '') + partText));
 
   let txtBtn = null;
   let pdfBtn = null;
   let pdfMeta = null;
   let pdfFill = null;
   let pdfBar = null;
-  const idleLabel = { txt: 'Download', pdf: 'Download' };
 
   if (hasText) {
     const row = el('div', 'row');
@@ -158,7 +210,7 @@ function showCard(data) {
       el('div', 'label', 'Notes (.txt)'),
       el('div', 'meta', `${data.notes.length} notes · ${data.quiz.length} questions`)
     );
-    txtBtn = el('button', 'btn', idleLabel.txt);
+    txtBtn = el('button', 'btn', 'Download');
     txtBtn.addEventListener('click', () => {
       txtBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'txt', key: data.key, data });
@@ -196,6 +248,14 @@ function showCard(data) {
     card.appendChild(bothBtn);
   }
 
+  const libBtn = el('button', 'btn wide', '+ Add to library');
+  libBtn.addEventListener('click', () => {
+    libBtn.disabled = true;
+    libBtn.textContent = 'Saving…';
+    safeSend({ action: 'library-add', key: data.key, data });
+  });
+  card.appendChild(libBtn);
+
   root.appendChild(card);
   document.body.appendChild(hostEl);
 
@@ -206,7 +266,18 @@ function showCard(data) {
     setTimeout(() => { btn.textContent = label; }, 2500);
   }
 
+  async function refreshLib() {
+    try {
+      const { library = {} } = await chrome.storage.local.get('library');
+      const saved = !!library[data.id];
+      libBtn.textContent = saved ? 'In library ✓ · click to update' : '+ Add to library';
+      libBtn.classList.toggle('inlib', saved);
+      libBtn.disabled = false;
+    } catch (e) {}
+  }
+
   ui = {
+    refreshLib,
     update(msg) {
       if (msg.kind === 'pdf-progress' && pdfBtn) {
         if (msg.state === 'building') {
@@ -216,7 +287,7 @@ function showCard(data) {
           pdfBtn.classList.add('busy');
         } else if (msg.state === 'ready') {
           pdfBar.style.display = 'none';
-          pdfBtn.textContent = idleLabel.pdf;
+          pdfBtn.textContent = 'Download';
           pdfBtn.classList.remove('busy');
         } else if (msg.state === 'error') {
           pdfBar.style.display = 'none';
@@ -228,15 +299,25 @@ function showCard(data) {
         }
       }
       if (msg.kind === 'saved') {
-        if (msg.which === 'txt') flashSaved(txtBtn, idleLabel.txt);
-        if (msg.which === 'pdf') flashSaved(pdfBtn, idleLabel.pdf);
+        if (msg.which === 'txt') flashSaved(txtBtn, 'Download');
+        if (msg.which === 'pdf') flashSaved(pdfBtn, 'Download');
         if (msg.which === 'error') {
           [txtBtn, pdfBtn].forEach((b) => { if (b) b.disabled = false; });
         }
         bothBtn.disabled = false;
       }
+      if (msg.kind === 'library') {
+        if (msg.state === 'saving') libBtn.textContent = 'Saving…';
+        if (msg.state === 'saved') refreshLib();
+        if (msg.state === 'error') {
+          libBtn.textContent = "Couldn't save · retry";
+          libBtn.disabled = false;
+        }
+      }
     },
   };
+
+  refreshLib();
 
   // Start building the files in the background so they're ready on click
   safeSend({ action: 'prebuild', key: data.key, data });
@@ -280,9 +361,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 try {
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'sync' || !changes.autoCard) return;
-    if (changes.autoCard.newValue === false) hideCard();
-    else if (cachedData) showCard(cachedData);
+    if (area === 'sync' && changes.autoCard) {
+      if (changes.autoCard.newValue === false) hideCard();
+      else if (cachedData) showCard(cachedData);
+    }
+    if (area === 'local' && changes.library && ui) ui.refreshLib();
   });
 } catch (e) {}
 

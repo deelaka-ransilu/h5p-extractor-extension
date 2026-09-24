@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "H5P Weekly Extractor",
-  "version": "1.1",
-  "description": "Detects H5P lecture content on CODL Moodle pages and downloads notes (.txt) and slides (.pdf).",
-  "permissions": ["activeTab", "scripting", "downloads", "offscreen", "storage"],
+  "version": "1.2",
+  "description": "Detects H5P lecture content on CODL Moodle pages, downloads notes (.txt) and slides (.pdf), and keeps a personal library you can export as one zip.",
+  "permissions": ["activeTab", "scripting", "downloads", "offscreen", "storage", "unlimitedStorage"],
   "host_permissions": ["https://online.codl.lk/*"],
   "background": { "service_worker": "background.js" },
   "action": {

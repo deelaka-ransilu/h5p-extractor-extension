@@ -3,11 +3,15 @@ async function ensureOffscreenDocument() {
     await chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: ['BLOBS'],
-      justification: 'Build a PDF/txt from extracted H5P content and trigger a named download.',
+      justification: 'Build PDFs/zips from extracted H5P content and trigger named downloads.',
     });
   } catch (e) {
     // "Only a single offscreen document may be created": one already exists, that's fine.
   }
+}
+
+function toOffscreen(message) {
+  return ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(message).catch(() => {}));
 }
 
 // blob URL -> the filename we want for it
@@ -23,6 +27,16 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   }
 });
 
+// Serialise writes to the library index so two quick saves can't overwrite each other
+let libraryChain = Promise.resolve();
+function saveLibraryMeta(meta) {
+  libraryChain = libraryChain.then(async () => {
+    const { library = {} } = await chrome.storage.local.get('library');
+    library[meta.id] = meta;
+    await chrome.storage.local.set({ library });
+  }).catch(() => {});
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = sender.tab ? sender.tab.id : undefined;
 
@@ -33,29 +47,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (chrome.action.setBadgeTextColor) chrome.action.setBadgeTextColor({ tabId, color: '#000000' });
   }
 
-  // Start building the files in the background so they're ready when clicked
+  // Build the files in the background as soon as a page is detected (whether or not it's saved)
   if (msg.action === 'prebuild') {
-    ensureOffscreenDocument().then(() => {
-      chrome.runtime
-        .sendMessage({ action: 'offscreen-prebuild', key: msg.key, data: msg.data, tabId })
-        .catch(() => {});
-    });
+    toOffscreen({ action: 'offscreen-prebuild', key: msg.key, data: msg.data, tabId });
   }
 
-  // Download request from the page card or the toolbar popup
+  // Download this page's files (from the page card or the toolbar popup)
   if (msg.action === 'buildAndDownload') {
-    ensureOffscreenDocument().then(() => {
-      chrome.runtime
-        .sendMessage({
-          action: 'offscreen-build',
-          kind: msg.kind || 'both',
-          key: msg.key || (msg.data && msg.data.key),
-          data: msg.data,
-          tabId,
-        })
-        .catch(() => {});
+    toOffscreen({
+      action: 'offscreen-build',
+      kind: msg.kind || 'both',
+      key: msg.key || (msg.data && msg.data.key),
+      data: msg.data,
+      tabId,
     });
     sendResponse({ started: true });
+  }
+
+  // Save this page's files into the library
+  if (msg.action === 'library-add') {
+    toOffscreen({ action: 'offscreen-library-add', key: msg.key || msg.data.key, data: msg.data, tabId });
+  }
+
+  // Zip up library items and download
+  if (msg.action === 'library-zip') {
+    toOffscreen({ action: 'offscreen-zip', items: msg.items, zipName: msg.zipName });
   }
 
   // Offscreen doc can't use chrome.downloads, so it asks us to do it
@@ -71,8 +87,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
   }
 
-  // Progress from the offscreen doc -> forward to the page card
-  if (msg.action === 'offscreen-status' && msg.tabId != null) {
-    chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
+  // Progress from the offscreen doc
+  if (msg.action === 'offscreen-status') {
+    if (msg.kind === 'library' && msg.state === 'saved' && msg.meta) saveLibraryMeta(msg.meta);
+    if (msg.tabId != null) chrome.tabs.sendMessage(msg.tabId, msg).catch(() => {});
   }
 });

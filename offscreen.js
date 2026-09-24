@@ -19,7 +19,8 @@ function sanitizeFilename(name) {
 
 function buildBaseName(data) {
   const week = data.weekLabel ? data.weekLabel.replace(/:\s*/, ' - ') : null;
-  const parts = [data.subject, week].filter(Boolean);
+  const part = data.partTotal > 1 && data.partIndex ? `Part ${data.partIndex}` : null;
+  const parts = [data.subject, week, part].filter(Boolean);
   const combined = sanitizeFilename(parts.join(' - ') || data.title || '');
   return combined || `h5p-content-${Date.now()}`;
 }
@@ -148,14 +149,108 @@ function getEntry(key, data, tabId) {
 
 // Offscreen documents can't use chrome.downloads, so we hand the blob URL
 // to background.js, which starts the actual download.
-function downloadBlob(blob, filename) {
+function downloadBlob(blob, filename, keepMs = 60000) {
   const url = URL.createObjectURL(blob);
   return chrome.runtime
     .sendMessage({ action: 'offscreen-download', url, filename })
     .catch(() => {})
     .then(() => {
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setTimeout(() => URL.revokeObjectURL(url), keepMs);
     });
+}
+
+/* ---------------- message handlers ---------------- */
+
+async function handleBuild(msg) {
+  const entry = getEntry(msg.key || (msg.data && msg.data.key) || msg.data.title, msg.data, msg.tabId);
+  const data = entry.data;
+  const kind = msg.kind || 'both';
+
+  log(`Found: ${data.notes.length} note block(s), ${data.quiz.length} question(s), ${data.images.length} image(s).`);
+  log(`Filename: ${entry.baseName}`);
+
+  if (kind === 'txt' || kind === 'both') {
+    await downloadBlob(entry.txtBlob, `${entry.baseName}.txt`);
+    log(`Downloaded: ${entry.baseName}.txt`);
+    status(entry.tabId, { kind: 'saved', which: 'txt' });
+  }
+
+  if ((kind === 'pdf' || kind === 'both') && data.images.length) {
+    if (!entry.pdfPromise) startPdf(entry);
+    log('Preparing slides.pdf…');
+    const pdfBlob = await entry.pdfPromise;
+    if (pdfBlob) {
+      await downloadBlob(pdfBlob, `${entry.baseName}.pdf`);
+      log(`Downloaded: ${entry.baseName}.pdf`);
+      status(entry.tabId, { kind: 'saved', which: 'pdf' });
+    }
+  }
+  log('Done.');
+}
+
+async function handleLibraryAdd(msg) {
+  const entry = getEntry(msg.key || msg.data.key || msg.data.title, msg.data, msg.tabId);
+  const data = entry.data;
+  status(entry.tabId, { kind: 'library', state: 'saving' });
+  log('Saving to library…');
+
+  let pdfBlob = null;
+  if (data.images.length) {
+    if (!entry.pdfPromise) startPdf(entry);
+    pdfBlob = await entry.pdfPromise; // the background build usually finished already
+  }
+
+  const id = data.id || msg.key;
+  await H5PDB.put(id, { txt: entry.txtBlob, pdf: pdfBlob });
+
+  const meta = {
+    id,
+    url: data.key,
+    cmid: data.cmid || null,
+    subject: data.subject || '',
+    weekLabel: data.weekLabel || '',
+    title: data.title || '',
+    notes: data.notes.length,
+    quiz: data.quiz.length,
+    slides: dedupeConsecutive(data.images || []).length,
+    partIndex: data.partIndex || null,
+    partTotal: data.partTotal || null,
+    savedAt: Date.now(),
+  };
+  status(entry.tabId, { kind: 'library', state: 'saved', meta });
+  log(`Saved to library: ${entry.baseName}`);
+  log('Done.');
+}
+
+async function handleZip(msg) {
+  const zip = new JSZip();
+  const items = msg.items || [];
+  let added = 0;
+
+  for (const it of items) {
+    const rec = await H5PDB.get(it.id);
+    if (!rec) {
+      log(`  (missing in storage, skipped: ${it.fileBase})`);
+      continue;
+    }
+    const folder = zip.folder(it.folder);
+    folder.file(`${it.fileBase}.txt`, rec.txt);
+    if (rec.pdf) folder.file(`${it.fileBase}.pdf`, rec.pdf);
+    added++;
+    log(`Added ${added}/${items.length}: ${it.fileBase}`);
+  }
+
+  if (!added) {
+    log('Nothing to zip.');
+    log('Done.');
+    return;
+  }
+
+  log('Building zip…');
+  const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }); // PDFs are already compressed
+  await downloadBlob(blob, msg.zipName || 'H5P library.zip', 300000);
+  log(`Downloaded: ${msg.zipName}`);
+  log('Done.');
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -165,39 +260,23 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
 
-  if (msg.action !== 'offscreen-build') return;
+  const handlers = {
+    'offscreen-build': handleBuild,
+    'offscreen-library-add': handleLibraryAdd,
+    'offscreen-zip': handleZip,
+  };
+  const handler = handlers[msg.action];
+  if (!handler) return;
 
   (async () => {
     try {
-      const entry = getEntry(msg.key || (msg.data && msg.data.key) || msg.data.title, msg.data, msg.tabId);
-      const data = entry.data;
-      const kind = msg.kind || 'both';
-
-      log(`Found: ${data.notes.length} note block(s), ${data.quiz.length} question(s), ${data.images.length} image(s).`);
-      log(`Filename: ${entry.baseName}`);
-
-      if (kind === 'txt' || kind === 'both') {
-        await downloadBlob(entry.txtBlob, `${entry.baseName}.txt`);
-        log(`Downloaded: ${entry.baseName}.txt`);
-        status(entry.tabId, { kind: 'saved', which: 'txt' });
-      }
-
-      if ((kind === 'pdf' || kind === 'both') && data.images.length) {
-        if (!entry.pdfPromise) startPdf(entry);
-        log('Preparing slides.pdf…');
-        const pdfBlob = await entry.pdfPromise;
-        if (pdfBlob) {
-          await downloadBlob(pdfBlob, `${entry.baseName}.pdf`);
-          log(`Downloaded: ${entry.baseName}.pdf`);
-          status(entry.tabId, { kind: 'saved', which: 'pdf' });
-        }
-      }
-
-      log('Done.');
+      await handler(msg);
     } catch (e) {
       log('Error: ' + e.message);
-      log('Done.'); // re-enables the popup button
-      if (msg.tabId != null) status(msg.tabId, { kind: 'saved', which: 'error' });
+      log('Done.'); // re-enables the popup buttons
+      if (msg.tabId != null) {
+        status(msg.tabId, { kind: msg.action === 'offscreen-library-add' ? 'library' : 'saved', state: 'error', which: 'error' });
+      }
     }
   })();
 });
