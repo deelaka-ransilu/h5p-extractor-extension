@@ -72,9 +72,7 @@
   });
 
   /* ---------- helpers ---------- */
-  function sanitize(name) {
-    return (name || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
-  }
+  const sanitize = H5PUtils.sanitizeFilename;
   function weekNum(label) {
     const m = /week\s*0*(\d+)/i.exec(label || '');
     return m ? parseInt(m[1], 10) : 999;
