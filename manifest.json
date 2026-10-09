@@ -36,7 +36,14 @@
     },
     {
       "matches": ["https://online.codl.lk/mod/hvp/*"],
-      "js": ["src/content/parser.js", "src/content/content.js"],
+      "js": [
+        "src/shared/icons.js",
+        "src/shared/utils.js",
+        "src/content/parser.js",
+        "src/content/collect.js",
+        "src/content/panel.js",
+        "src/content/main.js"
+      ],
       "run_at": "document_idle"
     }
   ]

@@ -48,12 +48,12 @@ Found at the bottom of the library page:
 No page scraping and no network interception. Moodle embeds each activity's content as JSON in `window.H5PIntegration`, and the extension walks that tree.
 
 ```
-inject.js (page world)  ->  content.js (isolated world)  ->  background.js (service worker)
-  reads H5PIntegration       parses with parser.js,            relays work to the
-  and relays it via          reads breadcrumb for              offscreen document,
-  postMessage                subject + week, shows UI          runs chrome.downloads
+inject.js (page world)  ->  content scripts (isolated)  ->  background.js (service worker)
+  reads H5PIntegration       collect.js: parser.js, breadcrumb    relays work to the
+  and relays it via          panel.js: floating button + panel    offscreen document,
+  postMessage                main.js: detection and settings      runs chrome.downloads
 
-                                                              offscreen.js
+                                                              offscreen.js + build.js
                                                                 builds .txt, .pdf (jsPDF),
                                                                 zips (JSZip), stores blobs
                                                                 in IndexedDB
@@ -63,30 +63,39 @@ Key points:
 
 - **`inject.js`** runs in the page's `MAIN` world, the only place `H5PIntegration` is visible, and relays the raw data to the content script.
 - **`parser.js`** recursively walks the H5P tree. It extracts text (`AdvancedText`, `Text`, `Table`), quiz content (`MultiChoice`, `Blanks`, `SingleChoiceSet`, `Summary`), and images. Slide images (inside a `CoursePresentation`) are kept separate from loose images so lab screenshots don't pollute the slide PDF. Structural containers (`CoursePresentation`, `InteractiveBook`, `Column`, `Accordion`, `InteractiveVideo`) are recursed into.
-- **`content.js`** adds the floating button and panel inside a Shadow DOM, so the page's CSS can't affect it.
-- **`offscreen.js`** lives in an offscreen document because it can hold blob URLs reliably through the browser's download flow. It keeps a small least-recently-used cache of built files (4 entries) and reports progress with job messages (`offscreen-job`: start / done / error).
+- **`collect.js`, `panel.js`, `main.js`** (content scripts) gather the page data, draw the floating button and panel inside a Shadow DOM so the page's CSS can't affect it, and handle detection and settings.
+- **`offscreen.js` and `build.js`** live in an offscreen document because it can hold blob URLs reliably through the browser's download flow. `build.js` makes the files; `offscreen.js` keeps a small least-recently-used cache of built files (4 entries), replays a finished build's state to a reloaded page, and reports progress with job messages (`offscreen-job`: start / done / error).
 - **`background.js`** opens the library from the toolbar icon, relays messages, and claims download filenames (`onDeterminingFilename`) so other download-related extensions can't rename the files.
 - **Storage.** File blobs live in IndexedDB (`library-db.js`). Lightweight metadata (subject, week, counts, save date) lives in `chrome.storage.local`. Settings and the button position live in `chrome.storage.sync`.
 
 ## Project structure
 
 ```
-manifest.json      Extension manifest (MV3)
-background.js      Service worker: toolbar icon, message relay, downloads
-content.js         Floating button + panel on H5P pages
-inject.js          Page-world script that exposes H5PIntegration data
-parser.js          H5P JSON tree -> notes, quiz, images
-offscreen.html/js  Builds .txt/.pdf/.zip and writes to IndexedDB
-library.html      The library page
-library-ui.js      Library page logic: list, select, zip, settings
-library-db.js      IndexedDB wrapper for the file blobs
-icons.js           Inline SVG icons for the library page
-ui.css             Library page styles
-libs/              jsPDF and JSZip (bundled)
-fonts/             Space Grotesk (bundled, SIL OFL)
-icons/             Extension icons
-CLAUDE.md          Architecture notes and conventions for AI-assisted work
+manifest.json
+src/
+  background/background.js   Service worker: toolbar icon, message relay, downloads
+  content/
+    inject.js                Page-world script that exposes H5PIntegration data
+    parser.js                H5P JSON tree -> notes, quiz, images
+    collect.js               Reads page data, breadcrumb and "Part N of M"
+    panel.js                 Floating button + panel (Shadow DOM)
+    main.js                  Detection, settings listeners, startup
+  offscreen/
+    offscreen.html           Offscreen document page
+    build.js                 Builds the .txt and .pdf
+    offscreen.js             Cache, download / library / zip jobs, progress
+  library/                   The library page (library.html, library.css, library-ui.js)
+  shared/
+    utils.js                 Small helpers used everywhere
+    icons.js                 SVG icons (single copy)
+    library-db.js            IndexedDB wrapper for the file blobs
+assets/                      Bundled font (Space Grotesk, SIL OFL) and extension icons
+vendor/                      jsPDF and JSZip (bundled)
+CLAUDE.md                    Architecture notes and conventions for AI-assisted work
 ```
+
+There is no build step: the scripts are plain files that share globals, listed in load order in
+`manifest.json`, `offscreen.html` and `library.html`.
 
 ## Permissions
 

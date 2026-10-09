@@ -1,213 +1,172 @@
 # CLAUDE.md — H5P Weekly Extractor
 
-Read this first in any new chat about this project. It replaces re-explaining
-context from scratch. Paste this file (or point Claude at it) before asking
-for changes.
+Read this first in any new chat about this project. Paste it (or point Claude at it)
+before asking for changes. It describes the code as of **v1.5 with the `src/` layout**.
 
 ## What this is
 
-A Manifest V3 Chrome extension, **"H5P Weekly Extractor,"** built for Dee's
-own use and for sharing with other University of Moratuwa BIT/CODL students.
-It's a side tool that feeds the [[bitprep]] (bitprep.tech) content pipeline:
-Dee generates weekly quiz banks per subject via a Claude Project fed with
-lecture material (normally PDF slides). Two subjects — ITE 3313 Data
-Visualization and ITE 3533 Machine Learning (25S2) — only have interactive
-H5P content on the LMS (`online.codl.lk`, Moodle, `mod/hvp`), with no
-downloadable PDFs. This extension extracts that content into a `.txt`
-(notes + quiz Q&A) and a `.pdf` (slides), which then get fed into the
-subject's Claude Project as source material.
+A Manifest V3 Chrome extension for Dee's own use, to be shared with other University of
+Moratuwa BIT/CODL students. It feeds the BITprep (bitprep.tech) content pipeline: Dee
+generates weekly quiz banks per subject in a Claude Project fed with lecture material
+(normally PDF slides). ITE 3313 Data Visualization and ITE 3533 Machine Learning (25S2)
+only have interactive H5P content on the LMS (`online.codl.lk`, Moodle `mod/hvp`), with no
+downloadable PDFs. The extension turns each H5P week into a `.txt` (notes + quiz Q&A) and a
+`.pdf` (slides). Always write the brand as **"BITprep"**.
 
-Note: brand is always **"BITprep,"** never "BitPrep" — same convention
-applies loosely here even though this extension is a standalone tool, not
-part of the bitprep.tech codebase itself.
+## Project layout
 
-## Core architecture
+```
+manifest.json
+src/
+  background/background.js    service worker: toolbar click, message relay, downloads
+  content/                    runs on https://online.codl.lk/mod/hvp/*
+    inject.js                 MAIN world: reads H5PIntegration, relays via postMessage
+    parser.js                 H5P JSON tree -> notes, quiz, images (window.H5PExtractor)
+    collect.js                requests raw data, breadcrumb, "Part N of M", collect()
+    panel.js                  floating button + panel (Shadow DOM), drag/snap, status UI
+    main.js                   detection, settings/storage listeners, init()
+  offscreen/
+    offscreen.html            loads vendor libs + shared + build.js + offscreen.js
+    build.js                  buildBaseName, buildNotesText, buildSlidesPdf (pure builders)
+    offscreen.js              cache, jobs (download / library / zip), progress messages
+  library/                    the only UI page (opened from the toolbar icon)
+    library.html  library.css  library-ui.js
+  shared/
+    utils.js                  H5PUtils: dedupeConsecutive, questionTotal, sanitizeFilename, clamp
+    icons.js                  the one copy of the SVG icons: icon(), setBtn()
+    library-db.js             IndexedDB wrapper (H5PDB)
+assets/fonts, assets/icons    bundled Space Grotesk font and extension icons
+vendor/                       jspdf.umd.min.js, jszip.min.js
+```
 
-No DOM scraping, no network interception. The extension reads
-`window.H5PIntegration.contents[cid].jsonContent` — a stringified JSON blob
-Moodle/H5P embeds directly in the page — and walks that tree.
+There is no build step and no bundler. Scripts share globals, so **load order matters**:
 
-**Message flow for extraction:**
-1. `inject.js` runs in the page's **MAIN world** (only place `H5PIntegration`
-   is visible) and relays the raw JSON via `postMessage` on request.
-2. `content.js` (isolated world, has `chrome.runtime`) requests that data,
-   parses it with `parser.js` (`window.H5PExtractor`), and also reads the
-   Moodle breadcrumb (`getBreadcrumbInfo()`) for subject code + week label.
-3. `parser.js` walks the H5P tree recursively and returns
-   `{ notes, quiz, images, slideImages, otherImages }`.
-4. `background.js` (service worker) relays build/download requests to an
-   **offscreen document**, because offscreen docs are the only place that
-   can reliably hold a `blob:` URL through a native Save-As dialog without
-   losing the filename.
-5. `offscreen.js` builds the `.txt` (plain text) and `.pdf` (jsPDF, one
-   image per page) and hands blob URLs back to `background.js` for the
-   actual `chrome.downloads.download()` call.
+- Content scripts (manifest): `icons.js, utils.js, parser.js, collect.js, panel.js, main.js`.
+  `main.js` is last because it calls `init()` on load.
+- Offscreen (`offscreen.html`): `jspdf, jszip, utils.js, library-db.js, build.js, offscreen.js`.
+- Library (`library.html`): `icons.js, utils.js, library-db.js, library-ui.js`.
 
-**Why the offscreen document exists at all:** popups close the moment a
-native Save-As dialog steals focus, which either randomizes blob-URL
-filenames or (for `data:` URLs) makes Chrome ignore the suggested filename
-and fall back to `download.ext`. The offscreen document persists through
-the save dialog.
+Top-level `let/const/function` names are global within one context, so a name must be
+declared in exactly one file per context (a duplicate `const` is a SyntaxError that stops
+the whole script). `build.js` calls `log()`, which lives in `offscreen.js`.
 
-**Why `chrome.downloads.onDeterminingFilename` exists in `background.js`:**
-even with the offscreen fix, another installed extension with `downloads`
-permission (e.g. a video downloader) can rename the file and win the race.
-Explicitly claiming the filename in `onDeterminingFilename` fixed this in
-testing. Worth remembering if filenames ever go wrong again — check for
-other download-related extensions first.
+## Architecture
 
-## Parser details (`parser.js`)
+No DOM scraping and no network interception. The extension reads
+`window.H5PIntegration.contents[cid].jsonContent` (a stringified JSON blob Moodle embeds)
+and walks that tree.
 
-- Content type → output:
-  - `H5P.AdvancedText` / `H5P.Text` / `H5P.Table` → plain-text `notes`
-    (HTML stripped via `stripHtml()`)
-  - `H5P.MultiChoice` / `H5P.Blanks` / `H5P.SingleChoiceSet` / `H5P.Summary`
-    → `quiz` entries with correct answers flagged
-  - `H5P.Image` → resolved to a real URL via `contentUrl + "/" + file.path`
-- **Slides vs. loose images:** images are split into `slideImages` (found
-  while `inSlides` context is true — i.e. inside an `H5P.CoursePresentation`)
-  and `otherImages` (everything else, e.g. a lab screenshot embedded in a
-  notes page). `out.images` = `slideImages` if any exist, else falls back to
-  `otherImages`. **This was a real bug once:** before this split existed,
-  lab/figure images embedded in lecture notes got mixed into the slide PDF
-  alongside the actual `CoursePresentation` slides, bloating Week 07's PDF
-  hugely. Don't remove this split.
-- **`bookCover` is explicitly skipped** during the tree walk — H5P's
-  `InteractiveBook` sets a `bookCover.coverMedium` image that's visually
-  identical to real slide 1, and including it produced an apparent
-  duplicated first slide.
-- `H5P.Summary`'s answer-key extraction is **speculative and never
-  fully validated** against a real Summary interaction — treat its output
-  with suspicion if a week uses that type.
-- Parser currently only recognizes the content types listed above. A new
-  H5P subtype appearing in an untested week/subject will silently produce
-  no notes/quiz for that block (not a crash, just missing output) — worth
-  a quick JSON dump-and-inspect if a week's counts look too low.
+**Message flow**
+1. `inject.js` (MAIN world, the only place `H5PIntegration` is visible) answers a
+   `postMessage` request from `collect.js` with the raw JSON.
+2. `collect.js` parses it with `parser.js`, reads the Moodle breadcrumb (subject + week
+   label) and works out "Part N of M" by fetching the week's course-page section.
+3. `main.js` calls `showCard()` in `panel.js` (unless the `autoCard` setting is off) and the
+   panel sends `prebuild` so files start building in the background immediately.
+4. `background.js` relays build / download / library / zip requests to the **offscreen
+   document**, creating it on demand.
+5. `offscreen.js` builds the `.txt` and `.pdf`, and asks `background.js`
+   (`offscreen-download`) to start the actual `chrome.downloads.download()`, because
+   offscreen documents cannot use `chrome.downloads`.
+
+**Job and status messages**
+- `offscreen-job` `{job: 'download'|'library'|'zip', state: 'start'|'done'|'error', error?}`
+  tells the library page what is running (it counts running jobs). The old `"Done."`
+  log-string protocol is gone.
+- `offscreen-status` goes to the originating tab: `pdf-progress` (building/ready/error),
+  `saved` (txt/pdf/error), `library` (saving/saved/error).
+- `offscreen-log` is debug text only. `app-error` is the background reporting a failed
+  Chrome download.
+
+**Offscreen cache** — `cache` is capped at 4 entries (least recently used evicted); an
+evicted entry rebuilds from the data the page sends. Each entry remembers its last PDF
+state (`pdfState`) and **replays it on `offscreen-prebuild`**, so a reloaded tab's fresh
+"Preparing…" button learns the build is already done. (This fixed a button stuck on
+"Preparing…" after a page reload.)
+
+**`onDeterminingFilename`** in `background.js` claims our filenames; another extension with
+the `downloads` permission (e.g. IDM) can otherwise rename the file and win the race.
+Check for other download extensions first if filenames go wrong.
+
+## Parser (`parser.js`)
+
+- `AdvancedText` / `Text` / `Table` -> `notes`. `MultiChoice` / `Blanks` /
+  `SingleChoiceSet` / `Summary` -> `quiz`. `Image` -> resolved URL via `contentUrl/path`.
+- **Slides vs loose images:** images inside an `H5P.CoursePresentation` go to `slideImages`;
+  all others go to `otherImages`. `images` = `slideImages` if any, else `otherImages`. Do not
+  remove this split (lab screenshots once bloated a slide PDF).
+- `bookCover` is skipped during the walk (it duplicates real slide 1).
+- Structural containers are recursed into and never reported as unknown: `CoursePresentation`,
+  `InteractiveBook`, `Column`, `Accordion`, `InteractiveVideo`.
+- Any other H5P type found but not handled goes into `unknown`; the panel shows an amber
+  "Not extracted: …" line. Empty `H5P.Summary` blocks are skipped.
+- `questionCount` is the real question count (sets count once per item).
+- `H5P.Summary` extraction (`summaries[].summary[]`, first string correct, plus `tip`) is
+  **still unvalidated** against a real Summary that has statements.
 
 ## Filenames
 
-Built in `offscreen.js` (`buildBaseName`) from `{subject} - {week label} -
-{part}` (breadcrumb-derived), OS-invalid characters (`\ / : * ? " < > |`)
-stripped via `sanitizeFilename()`, with a timestamp fallback if everything
-comes back empty. **Part numbering:** when a week has multiple H5P
-activities, `content.js`'s `getPartInfo()` fetches the week's section on the
-Moodle course page (using the logged-in session) and finds this activity's
-index among that week's `mod/hvp` links, producing "Part 1 of 3" etc. If
-that lookup ever fails, it silently returns `{}` (no part suffix) rather
-than erroring.
+`buildBaseName()` in `build.js`: `{subject} - {week label} - Part N`, sanitized by
+`H5PUtils.sanitizeFilename`, with a timestamp fallback. Multiple H5P activities in a week are
+**separate library entries** ("Part N"). The part lookup silently returns `{}` if the course
+page can't be read (no suffix, no error). The selectors in `getPartInfo`
+(`li.section, [data-for="section"], .course-section`, `a[href*="/mod/hvp/view.php"]`) have
+**not been verified** against real markup.
 
-## Library / storage (added after the initial extractor)
+## Library and storage
 
-- **IndexedDB** (`library-db.js`, `H5PDB`) holds the actual file blobs
-  (`.txt` + `.pdf` per saved week), keyed by content ID. `unlimitedStorage`
-  permission avoids `chrome.storage`'s 10 MB cap — two subjects × ~13 weeks
-  × ~4 MB PDFs adds up fast.
-- **`chrome.storage.local`** (`library` key) holds only lightweight metadata
-  per saved item (subject, weekLabel, title, counts, savedAt, part info) so
-  the UI can render the list instantly without touching IndexedDB.
-- **Files are pre-built on page detection**, whether or not the user saves —
-  `background.js`'s `prebuild` message triggers `offscreen.js` to start
-  building the `.txt`/`.pdf` in the background as soon as H5P content is
-  found, cached by page URL (`cache` Map in `offscreen.js`). "Add to
-  library" then just writes the already-built blobs to IndexedDB — no
-  rebuild, so it's fast.
-- **Decision (explicit, from Dee):** multiple H5P activities in one week are
-  **not merged** — each becomes its own library entry with a "Part N"
-  suffix. Saving is **manual** (a button), not automatic on page load —
-  but the *building* happens automatically in the background regardless of
-  whether the user ever clicks save.
-- Export is a **zip** (JSZip, built in `offscreen.js`'s `handleZip`), with
-  one folder per subject. Note: **the two-file-per-week download (Download
-  both) is deliberately NOT zipped** — Dee wants separate `.txt`/`.pdf` for
-  direct upload into the Claude Project workflow; zip only makes sense for
-  bulk library export.
+- `H5PDB` (IndexedDB, `library-db.js`) holds the `.txt`/`.pdf` blobs per saved week;
+  `unlimitedStorage` avoids the quota.
+- `chrome.storage.local` key `library` holds lightweight metadata per saved week.
+- `chrome.storage.sync`: `autoCard` (show the floating button, default true), `debugLog`
+  (show the debug log on the library page, default false), `fabPos {side, y}` (button
+  position, synced across tabs).
+- Saving to the library is **manual**. Pre-building files is automatic. "Download both"
+  stays two separate files (no zip); zip is only for bulk library export (one folder per
+  subject).
 
-## UI / theme
+## UI
 
-- Palette (also used in `ui.css` and the in-page card's inline `CARD_CSS`):
-  page `#121212`, card `#1A1A1A`, hover `#202020`, border `#2A2A2A`,
-  text `#FFFFFF`/`#8A8A8A`/`#4A4A4A`, brand green `#22C801`
-  (hover `#1CA601`), warning `#F0B429`, error `#EF4444`. These match Dee's
-  Tailwind `@theme` tokens from another project — keep consistent if asked
-  to restyle.
-- Font: Space Grotesk, bundled locally (`fonts/SpaceGrotesk.woff2`) and
-  loaded via a `@font-face` injected into the *page's* `<head>` (not the
-  shadow root — `@font-face` doesn't work scoped inside shadow DOM).
-- **In-page floating card** (`content.js`, Shadow DOM, `CARD_CSS`) appears
-  bottom-right on detected H5P pages: shows week title, note/question/slide
-  counts, Download .txt / .pdf / both buttons, Add to library, and a link to
-  open the full library page.
-- **Icons:** hand-rolled inline SVG (Lucide-style paths), built via
-  `DOMParser` + `importNode`, no `innerHTML`. Duplicated in three places
-  (`content.js`'s `ICON_PATHS`, `icons.js`'s `ICON_PATHS`) — if adding a new
-  icon, it currently needs to go in both. `icons.js` is the one loaded by
-  `popup.html`/`library.html`; `content.js` has its own inline copy since
-  it can't easily import a separate script into its Shadow DOM context.
-- **Toolbar popup** (`popup.html`/`popup.js`): two tabs, "This page" (same
-  actions as the floating card) and "Library" (list, search, select, zip,
-  remove). Loads `icons.js`, `library-db.js`, `library-ui.js`.
-- **Full-page library** (`library.html`): same `library-ui.js` logic as the
-  popup's Library tab, rendered full-width (`body.full` CSS variants) with
-  more room, plus a storage-usage readout via `navigator.storage.estimate()`.
-  Opened via `background.js`'s `open-library` handler, which focuses an
-  existing tab if one's already open rather than duplicating it.
-- Remove actions use a **two-step confirm** pattern (`twoStep()` in
-  `library-ui.js`): first click arms the button ("Click again to remove"),
-  a second click within 3.5s confirms, otherwise it resets. Applies to
-  per-week, per-subject, and bulk-selected removal.
+- Toolbar icon opens or focuses the library page (`chrome.action.onClicked`); there is no popup.
+- Floating button: 46px green circle, draggable, snaps to the left/right edge. The panel opens
+  above or below depending on space. Esc, outside click, or window blur (clicking into the H5P
+  iframe) closes it. Hidden during fullscreen. A tick badge shows when the week is in the library.
+- No visible log box: status is shown on buttons ("Zipping…", "Saving…", "Preparing n/m") and
+  in red error banners (panel and library page). The debug log is a Settings toggle.
+- Palette: page `#121212`, card `#1A1A1A`, hover `#202020`, border `#2A2A2A`, text
+  `#FFFFFF`/`#8A8A8A`/`#4A4A4A`, brand green `#22C801` (hover `#1CA601`), warning `#F0B429`,
+  error `#EF4444`. Font: Space Grotesk, bundled; the content script injects the `@font-face`
+  into the page `<head>` (it does not work inside a shadow root).
+- Icons are hand-rolled Lucide-style SVG built with `DOMParser` + `importNode` (no
+  `innerHTML`). One copy only, in `shared/icons.js`, loaded by both the content scripts and
+  the library page.
+- Remove actions use a two-step confirm (`twoStep()` in `library-ui.js`).
 
-## Known open items / discussed-but-not-yet-built
+## Permissions
 
-A UI overhaul was discussed and planned in detail but **has not been
-implemented** as of the current file structure (popup.html/popup.js still
-exist, the floating card is still a fixed corner card, not a draggable
-floater). If picking this back up, the agreed plan was:
+`downloads`, `offscreen`, `storage`, `unlimitedStorage`, plus host permission for
+`https://online.codl.lk/*`. `activeTab` and `scripting` were removed (unused).
 
-- **Phase 1:** toolbar icon opens/focuses the library directly (remove
-  `popup.html`/`popup.js` and `default_popup` from the manifest); remove the
-  visible log box (replace with button-level status + a small red error
-  banner, with an optional "Debug log" toggle in Settings); turn the fixed
-  in-page card into a **draggable, edge-snapping floating button** (like a
-  Next.js dev-mode indicator) that expands into the current panel on click
-  and collapses on Esc/outside-click; hides during fullscreen video.
-- **Phase 2:** an "auto-save weeks to library" setting (still respects
-  "don't overwrite already-saved weeks" — re-save stays manual), with the
-  offscreen document limited to building 2 PDFs at a time to avoid memory
-  spikes from many tabs opened at once.
-- **Phase 3:** batch-save all H5P activities in a course from the course
-  page itself (open each in a background tab, save, close, ~3s delay
-  between), to avoid the tab-hopping Dee was doing manually. **Blocked on**
-  Dee sending real HTML from an ITE3533 course-page week section — the
-  selectors for grouping activities by week were never written because
-  they need to match real Moodle markup, not guessed.
+## Known gaps and plans
 
-Other known gaps:
-- Only tested against ITE 3313 Data Visualization; **ITE 3533 Machine
-  Learning has not been tested** — could use H5P subtypes the parser
-  doesn't handle yet, or a different breadcrumb structure.
-- `libs/jszip.min.js` is used again now (for the zip-export feature) —
-  an earlier handoff called it dead weight, that's no longer true.
-- Manifest permissions `activeTab` and `scripting` were flagged as unused
-  and worth removing before any Chrome Web Store submission (Web Store
-  review checks for unused permissions).
-- No privacy policy or store listing text written yet.
-- Copyright/permissions consideration flagged but unresolved: the tool only
-  helps a student view content they're already entitled to see, but wider
-  distribution of extracted lecture material is a separate question from
-  distributing the extraction tool itself — worth checking CODL's terms
-  before any public release.
+- Tested on ITE 3313 and ITE 3533 only. Other subjects may use H5P types we haven't seen;
+  the amber "Not extracted" line is how that will show up.
+- Phase 2: an `autoSave` setting that saves detected weeks to the library without ever
+  overwriting already-saved weeks (re-save stays manual), with at most 2 PDFs building at a
+  time in the offscreen document.
+- Phase 3: batch-save every H5P activity of a course from the course page (background tabs,
+  about 3 s apart). Blocked on real HTML from an ITE3533 course-page week section (Inspect,
+  then "Copy outer HTML" on the section element).
+- Chrome Web Store: privacy policy and listing text are not written yet. Check CODL's terms
+  about redistributing extracted lecture material (unresolved).
 
 ## Conventions for working on this project
 
-- Dee wants **full file replacements**, not diffs, sent one at a time (or a
-  small clearly-listed set) — this matches the [[bitprep]] working
-  preference too.
-- Ask before guessing UX/data decisions on anything non-trivial (e.g. the
-  "merge multi-part weeks or not" and "manual vs auto-save" choices were
-  both explicitly asked and answered before building).
-- Request the actual current source before making edits — file contents
-  drift from what's in chat history (e.g. `icon.js` vs `icons.js` naming
-  slip caught by inspecting the real file tree, not assumed).
-- Real bugs so far were almost always caught by Dee testing against live
-  Moodle pages and sending screenshots/console output — there's no
-  automated test setup for this extension.
+- Dee wants **full file replacements**, not diffs, listed clearly with their paths.
+- Terminal walkthroughs: **one step, then wait for the output** before continuing.
+- Ask before guessing non-trivial UX/data decisions.
+- Request the current source rather than assuming (use the file-collector script).
+- Real bugs are found by Dee testing on live Moodle pages and sending screenshots or
+  console output. There is no automated test setup.
+- Before delivering JS: `node --check` each file, and lint the concatenated bundles (content
+  and offscreen, in load order) for undefined or duplicate names.
