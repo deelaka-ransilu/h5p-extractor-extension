@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "H5P Weekly Extractor",
-  "version": "1.5",
+  "version": "1.6",
   "description": "Detects H5P lecture content on CODL Moodle pages, downloads notes (.txt) and slides (.pdf), and keeps a personal library you can export as one zip.",
   "icons": {
     "16": "assets/icons/icon16.png",
