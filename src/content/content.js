@@ -4,6 +4,10 @@
 let cachedData = null;
 let hostEl = null;
 let ui = null;
+let teardown = null; // removes the document/window listeners added while the button is mounted
+
+// Where the floating button lives: which edge, and how far down (0 = top, 1 = bottom)
+let fabPos = { side: 'right', y: 0.85 };
 
 /* ---------------- data collection ---------------- */
 
@@ -107,6 +111,22 @@ function dedupeConsecutive(urls) {
   return urls.filter((url, i) => i === 0 || url !== urls[i - 1]);
 }
 
+// Real question count (falls back to block count)
+function questionTotal(data) {
+  return typeof data.questionCount === 'number' ? data.questionCount : data.quiz.length;
+}
+
+// "Not extracted: Video ×2, Accordion" or '' when everything was understood
+function unknownNote(data) {
+  if (!data.unknown || !data.unknown.length) return '';
+  return (
+    'Not extracted: ' +
+    data.unknown
+      .map((u) => u.library.replace(/^H5P\./, '') + (u.count > 1 ? ' ×' + u.count : ''))
+      .join(', ')
+  );
+}
+
 function safeSend(message) {
   try {
     chrome.runtime.sendMessage(message).catch(() => {});
@@ -115,7 +135,19 @@ function safeSend(message) {
   }
 }
 
-/* ---------------- floating card (Shadow DOM) ---------------- */
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function viewport() {
+  const d = document.documentElement;
+  return { w: d.clientWidth, h: d.clientHeight };
+}
+
+/* ---------------- floating button + panel (Shadow DOM) ---------------- */
+
+const FAB = 46;   // button size
+const EDGE = 12;  // gap between the button and the screen edge
 
 const ICON_PATHS = {
   download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
@@ -152,7 +184,7 @@ function ensureFont() {
     s.id = 'h5px-font';
     s.textContent =
       "@font-face{font-family:'H5PX Space Grotesk';src:url('" +
-      chrome.runtime.getURL('fonts/SpaceGrotesk.woff2') +
+      chrome.runtime.getURL('assets/fonts/SpaceGrotesk.woff2') +
       "') format('woff2');font-weight:300 700;font-display:swap;}";
     document.head.appendChild(s);
   } catch (e) {}
@@ -161,15 +193,40 @@ function ensureFont() {
 const CARD_CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; }
-@keyframes slide-in { from { opacity: 0; transform: translateX(60px); } to { opacity: 1; transform: translateX(0); } }
-.card {
-  position: fixed; right: 20px; bottom: 20px; width: 330px; z-index: 2147483647;
+[hidden] { display: none !important; }
+
+/* ---- floating button ---- */
+.fab {
+  position: fixed; z-index: 2147483647; width: 46px; height: 46px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #000000; background: #22C801; border: 0; border-radius: 50%;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45); cursor: grab; touch-action: none; user-select: none;
+  transition: left .25s cubic-bezier(0.22, 1, 0.36, 1), top .25s cubic-bezier(0.22, 1, 0.36, 1), background .15s ease, transform .15s ease;
+}
+.fab:hover { background: #1CA601; transform: scale(1.06); }
+.fab.dragging { cursor: grabbing; transition: none; transform: scale(1.1); }
+.fab:focus-visible { outline: 2px solid #FFFFFF; outline-offset: 2px; }
+.fab .badge {
+  position: absolute; top: -3px; right: -3px; width: 18px; height: 18px;
+  display: none; align-items: center; justify-content: center;
+  color: #22C801; background: #1A1A1A; border: 1px solid #22C801; border-radius: 50%;
+}
+.fab .badge.on { display: flex; }
+
+/* ---- panel ---- */
+.panel {
+  position: fixed; z-index: 2147483646; width: 330px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto;
   background: #1A1A1A; color: #FFFFFF; border: 1px solid #2A2A2A; border-radius: 14px;
   padding: 14px; box-shadow: 0 12px 40px rgba(0,0,0,.55);
   font-family: 'H5PX Space Grotesk', 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  animation: slide-in 600ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  visibility: hidden; opacity: 0; transform: translateY(6px) scale(.98); pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease, visibility 0s linear .18s;
 }
-@media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+.panel.open { visibility: visible; opacity: 1; transform: none; pointer-events: auto; transition: opacity .18s ease, transform .18s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .fab, .panel, .panel.open { transition: none; }
+  .fab:hover, .fab.dragging { transform: none; }
+}
 .ico { display: inline-flex; flex-shrink: 0; }
 .head { display: flex; align-items: center; gap: 8px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #22C801; flex-shrink: 0; }
@@ -178,6 +235,8 @@ const CARD_CSS = `
 .close:hover { color: #FFFFFF; background: #202020; }
 .title { margin: 10px 0 2px; font-size: 15px; font-weight: 600; line-height: 1.3; }
 .sub { margin: 0; font-size: 12px; color: #8A8A8A; }
+.warn { margin: 8px 0 0; font-size: 12px; line-height: 1.35; color: #F0B429; }
+.errbar { margin: 10px 0 0; padding: 8px 10px; font-size: 12px; line-height: 1.35; color: #EF4444; background: rgba(239,68,68,.08); border: 1px solid #EF4444; border-radius: 8px; }
 .row { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px; background: #121212; border: 1px solid #2A2A2A; border-radius: 10px; }
 .row:hover { background: #202020; }
 .ib { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; flex-shrink: 0; color: #22C801; background: #1A1A1A; border: 1px solid #2A2A2A; border-radius: 8px; }
@@ -208,6 +267,8 @@ function el(tag, cls, text) {
 }
 
 function hideCard() {
+  if (teardown) teardown();
+  teardown = null;
   if (hostEl) hostEl.remove();
   hostEl = null;
   ui = null;
@@ -230,20 +291,54 @@ function showCard(data) {
   style.textContent = CARD_CSS;
   root.appendChild(style);
 
-  const card = el('div', 'card');
+  /* ----- the floating button ----- */
+  const fab = el('button', 'fab');
+  fab.setAttribute('aria-label', 'H5P Weekly Extractor');
+  fab.setAttribute('aria-expanded', 'false');
+  fab.title = 'H5P Weekly Extractor (drag to move)';
+  fab.appendChild(ic('download', 20));
+  const badge = el('span', 'badge');
+  badge.appendChild(ic('check', 10));
+  fab.appendChild(badge);
+
+  /* ----- the panel ----- */
+  const panel = el('div', 'panel');
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'H5P Weekly Extractor');
 
   const head = el('div', 'head');
   const close = el('button', 'close');
-  close.setAttribute('aria-label', 'Dismiss');
+  close.setAttribute('aria-label', 'Close');
   close.appendChild(ic('x', 16));
-  close.addEventListener('click', hideCard);
   head.append(el('span', 'dot'), el('span', 'kicker', 'H5P content detected'), close);
-  card.appendChild(head);
+  panel.appendChild(head);
 
   const weekTitle = data.weekLabel ? data.weekLabel.replace(/:\s*/, ' – ') : data.title;
   const partText = data.partTotal > 1 ? ` · Part ${data.partIndex} of ${data.partTotal}` : '';
-  card.appendChild(el('p', 'title', weekTitle || 'H5P content'));
-  card.appendChild(el('p', 'sub', (data.subject || '') + partText));
+  panel.appendChild(el('p', 'title', weekTitle || 'H5P content'));
+  panel.appendChild(el('p', 'sub', (data.subject || '') + partText));
+
+  const warnText = unknownNote(data);
+  if (warnText) {
+    const warn = el('p', 'warn', warnText);
+    warn.title = 'These H5P content types were found on this page but this extension does not read them yet.';
+    panel.appendChild(warn);
+  }
+
+  // Red error banner (hidden until something fails)
+  const errBar = el('div', 'errbar');
+  errBar.setAttribute('role', 'alert');
+  errBar.hidden = true;
+  panel.appendChild(errBar);
+
+  function showErr(text) {
+    errBar.textContent = text;
+    errBar.hidden = false;
+    openPanel(); // make sure the person actually sees it
+  }
+  function clearErr() {
+    errBar.hidden = true;
+  }
 
   let txtBtn = null;
   let pdfBtn = null;
@@ -258,16 +353,17 @@ function showCard(data) {
     const text = el('div', 'rtext');
     text.append(
       el('div', 'label', 'Notes (.txt)'),
-      el('div', 'meta', `${data.notes.length} notes · ${data.quiz.length} questions`)
+      el('div', 'meta', `${data.notes.length} notes · ${questionTotal(data)} questions`)
     );
     txtBtn = el('button', 'btn');
     setBtn(txtBtn, 'download', 'Download');
     txtBtn.addEventListener('click', () => {
+      clearErr();
       txtBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'txt', key: data.key, data });
     });
     row.append(ib, text, txtBtn);
-    card.appendChild(row);
+    panel.appendChild(row);
   }
 
   if (hasSlides) {
@@ -283,29 +379,32 @@ function showCard(data) {
     pdfBtn = el('button', 'btn busy');
     setBtn(pdfBtn, null, 'Preparing…');
     pdfBtn.addEventListener('click', () => {
+      clearErr();
       pdfBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'pdf', key: data.key, data });
     });
     row.append(ib, text, pdfBtn);
-    card.appendChild(row);
+    panel.appendChild(row);
   }
 
   const bothBtn = el('button', 'btn primary');
   setBtn(bothBtn, 'download', 'Download both');
   if (hasText && hasSlides) {
     bothBtn.addEventListener('click', () => {
+      clearErr();
       bothBtn.disabled = true;
       if (txtBtn) txtBtn.disabled = true;
       if (pdfBtn) pdfBtn.disabled = true;
       safeSend({ action: 'buildAndDownload', kind: 'both', key: data.key, data });
     });
-    card.appendChild(bothBtn);
+    panel.appendChild(bothBtn);
   }
 
   const actions = el('div', 'actions');
   const libBtn = el('button', 'btn grow');
   setBtn(libBtn, 'plus', 'Add to library');
   libBtn.addEventListener('click', () => {
+    clearErr();
     libBtn.disabled = true;
     setBtn(libBtn, null, 'Saving…');
     safeSend({ action: 'library-add', key: data.key, data });
@@ -315,11 +414,148 @@ function showCard(data) {
   setBtn(openBtn, 'library', '');
   openBtn.addEventListener('click', () => safeSend({ action: 'open-library' }));
   actions.append(libBtn, openBtn);
-  card.appendChild(actions);
+  panel.appendChild(actions);
 
-  root.appendChild(card);
+  root.append(fab, panel);
   document.body.appendChild(hostEl);
 
+  /* ----- open / close / position ----- */
+  let open = false;
+  let curLeft = 0;
+  let curTop = 0;
+
+  function placeFab() {
+    const { w, h } = viewport();
+    curLeft = fabPos.side === 'left' ? EDGE : w - FAB - EDGE;
+    curTop = clamp(fabPos.y * (h - FAB), EDGE, Math.max(EDGE, h - FAB - EDGE));
+    fab.style.left = curLeft + 'px';
+    fab.style.top = curTop + 'px';
+  }
+
+  function positionPanel() {
+    const { w, h } = viewport();
+    const f = fab.getBoundingClientRect();
+    const pw = panel.offsetWidth;
+    const ph = panel.offsetHeight;
+    let left = fabPos.side === 'right' ? f.right - pw : f.left;
+    left = clamp(left, 8, Math.max(8, w - pw - 8));
+    let top = f.top - ph - 10; // above the button if it fits...
+    if (top < 8) top = Math.min(f.bottom + 10, h - ph - 8); // ...otherwise below
+    top = Math.max(8, top);
+    panel.style.left = left + 'px';
+    panel.style.top = top + 'px';
+  }
+
+  function openPanel() {
+    if (open) return;
+    open = true;
+    panel.classList.add('open');
+    fab.setAttribute('aria-expanded', 'true');
+    positionPanel();
+  }
+
+  function closePanel() {
+    if (!open) return;
+    open = false;
+    panel.classList.remove('open');
+    fab.setAttribute('aria-expanded', 'false');
+  }
+
+  function togglePanel() {
+    if (open) closePanel(); else openPanel();
+  }
+
+  close.addEventListener('click', () => { closePanel(); fab.focus(); });
+
+  /* ----- dragging ----- */
+  let drag = null;
+
+  function saveFabPos() {
+    try { chrome.storage.sync.set({ fabPos }); } catch (e) {}
+  }
+
+  fab.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ol: curLeft, ot: curTop, moved: false };
+    try { fab.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  fab.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (!drag.moved) {
+      if (Math.hypot(dx, dy) < 5) return; // still a click, not a drag
+      drag.moved = true;
+      closePanel();
+      fab.classList.add('dragging');
+    }
+    const { w, h } = viewport();
+    curLeft = clamp(drag.ol + dx, 0, w - FAB);
+    curTop = clamp(drag.ot + dy, 0, h - FAB);
+    fab.style.left = curLeft + 'px';
+    fab.style.top = curTop + 'px';
+  });
+
+  function endDrag(e) {
+    if (!drag || e.pointerId !== drag.id) return;
+    const d = drag;
+    drag = null;
+    try { fab.releasePointerCapture(e.pointerId); } catch (err) {}
+    fab.classList.remove('dragging');
+    if (d.moved) {
+      // snap to the nearest side edge and remember it
+      const { w, h } = viewport();
+      fabPos = {
+        side: curLeft + FAB / 2 < w / 2 ? 'left' : 'right',
+        y: clamp(curTop / (h - FAB), 0, 1),
+      };
+      placeFab();
+      saveFabPos();
+    } else if (e.type === 'pointerup') {
+      togglePanel();
+    }
+  }
+  fab.addEventListener('pointerup', endDrag);
+  fab.addEventListener('pointercancel', endDrag);
+  // keyboard activation (Enter / Space) arrives as a click with detail 0
+  fab.addEventListener('click', (e) => { if (e.detail === 0) togglePanel(); });
+
+  /* ----- page-level listeners (removed again in hideCard) ----- */
+  const onDocDown = (e) => {
+    if (open && !e.composedPath().includes(hostEl)) closePanel();
+  };
+  const onKey = (e) => {
+    if (e.key === 'Escape' && open) { closePanel(); fab.focus(); }
+  };
+  const onBlur = () => closePanel(); // clicking into the H5P iframe blurs the page
+  const onResize = () => { placeFab(); if (open) positionPanel(); };
+  // Hide while a video / H5P is fullscreen so we never sit on top of it
+  const onFullscreen = () => {
+    const fs = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fs) closePanel();
+    hostEl.style.display = fs ? 'none' : '';
+  };
+
+  document.addEventListener('pointerdown', onDocDown, true);
+  document.addEventListener('keydown', onKey, true);
+  window.addEventListener('blur', onBlur);
+  window.addEventListener('resize', onResize);
+  document.addEventListener('fullscreenchange', onFullscreen);
+  document.addEventListener('webkitfullscreenchange', onFullscreen);
+  teardown = () => {
+    document.removeEventListener('pointerdown', onDocDown, true);
+    document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('blur', onBlur);
+    window.removeEventListener('resize', onResize);
+    document.removeEventListener('fullscreenchange', onFullscreen);
+    document.removeEventListener('webkitfullscreenchange', onFullscreen);
+  };
+
+  placeFab();
+  onFullscreen();
+
+  /* ----- status updates ----- */
   function flashSaved(btn) {
     if (!btn) return;
     setBtn(btn, 'check', 'Saved');
@@ -337,11 +573,16 @@ function showCard(data) {
       libBtn.classList.toggle('inlib', saved);
       libBtn.disabled = false;
       setBtn(openBtn, 'library', count ? String(count) : '');
+      badge.classList.toggle('on', saved);
     } catch (e) {}
   }
 
   ui = {
     refreshLib,
+    placeFab() {
+      placeFab();
+      if (open) positionPanel();
+    },
     update(msg) {
       if (msg.kind === 'pdf-progress' && pdfBtn) {
         if (msg.state === 'building') {
@@ -367,6 +608,7 @@ function showCard(data) {
         if (msg.which === 'pdf') flashSaved(pdfBtn);
         if (msg.which === 'error') {
           [txtBtn, pdfBtn].forEach((b) => { if (b) b.disabled = false; });
+          showErr(msg.error ? 'Download failed: ' + msg.error : 'Download failed. Please try again.');
         }
         bothBtn.disabled = false;
       }
@@ -374,8 +616,9 @@ function showCard(data) {
         if (msg.state === 'saving') setBtn(libBtn, null, 'Saving…');
         if (msg.state === 'saved') refreshLib();
         if (msg.state === 'error') {
-          setBtn(libBtn, null, "Couldn't save · retry");
+          setBtn(libBtn, null, 'Retry');
           libBtn.disabled = false;
+          showErr(msg.error ? "Couldn't save to library: " + msg.error : "Couldn't save to library. Please try again.");
         }
       }
     },
@@ -389,6 +632,15 @@ function showCard(data) {
 
 /* ---------------- detection ---------------- */
 
+async function loadFabPos() {
+  try {
+    const { fabPos: p } = await chrome.storage.sync.get('fabPos');
+    if (p && (p.side === 'left' || p.side === 'right') && typeof p.y === 'number') {
+      fabPos = { side: p.side, y: clamp(p.y, 0, 1) };
+    }
+  } catch (e) {}
+}
+
 async function onDetected(data) {
   safeSend({ action: 'h5p-detected' });
   let autoCard = true;
@@ -396,7 +648,10 @@ async function onDetected(data) {
     const stored = await chrome.storage.sync.get('autoCard');
     if (stored.autoCard === false) autoCard = false;
   } catch (e) {}
-  if (autoCard) showCard(data);
+  if (autoCard) {
+    await loadFabPos();
+    showCard(data);
+  }
 }
 
 async function init() {
@@ -427,7 +682,15 @@ try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.autoCard) {
       if (changes.autoCard.newValue === false) hideCard();
-      else if (cachedData) showCard(cachedData);
+      else if (cachedData) loadFabPos().then(() => showCard(cachedData));
+    }
+    // another tab moved the button: follow it
+    if (area === 'sync' && changes.fabPos && changes.fabPos.newValue) {
+      const p = changes.fabPos.newValue;
+      if (p && (p.side === 'left' || p.side === 'right') && typeof p.y === 'number') {
+        fabPos = { side: p.side, y: clamp(p.y, 0, 1) };
+        if (ui) ui.placeFab();
+      }
     }
     if (area === 'local' && changes.library && ui) ui.refreshLib();
   });

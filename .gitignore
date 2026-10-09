@@ -1,0 +1,6 @@
+project-structure.txt
+collected-*.txt
+*.zip
+node_modules/
+Thumbs.db
+.DS_Store

@@ -4,13 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>H5P Library</title>
-  <link rel="stylesheet" href="ui.css">
+  <link rel="stylesheet" href="library.css">
 </head>
 <body class="full">
   <main>
     <div class="topbar">
-      <div class="brand"><img src="icons/icon48.png" alt=""> H5P Weekly Extractor <span class="muted">· Library</span></div>
+      <div class="brand"><img src="../../assets/icons/icon48.png" alt=""> H5P Weekly Extractor <span class="muted">· Library</span></div>
       <div class="muted" id="storageInfo"></div>
+    </div>
+
+    <div class="banner" id="banner" role="alert" hidden>
+      <span id="bannerText"></span>
+      <button class="icon-btn" id="bannerClose" title="Dismiss"></button>
     </div>
 
     <label class="search">
@@ -27,10 +32,21 @@
       <button class="btn primary" id="zipSelBtn" disabled>Download selected (0)</button>
     </div>
 
-    <pre id="log" hidden></pre>
+    <section class="panel settings">
+      <div class="stitle">Settings</div>
+      <label class="toggle">
+        <input type="checkbox" id="optCard">
+        Show the floating button on H5P pages
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="optDebug">
+        Show debug log
+      </label>
+      <pre id="log" hidden></pre>
+    </section>
   </main>
-  <script src="icons.js"></script>
-  <script src="library-db.js"></script>
+  <script src="../shared/icons.js"></script>
+  <script src="../shared/library-db.js"></script>
   <script src="library-ui.js"></script>
 </body>
 </html>

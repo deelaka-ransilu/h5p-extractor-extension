@@ -1,7 +1,7 @@
 async function ensureOffscreenDocument() {
   try {
     await chrome.offscreen.createDocument({
-      url: 'offscreen.html',
+      url: 'src/offscreen/offscreen.html',
       reasons: ['BLOBS'],
       justification: 'Build PDFs/zips from extracted H5P content and trigger named downloads.',
     });
@@ -13,6 +13,22 @@ async function ensureOffscreenDocument() {
 function toOffscreen(message) {
   return ensureOffscreenDocument().then(() => chrome.runtime.sendMessage(message).catch(() => {}));
 }
+
+// Open the library page, or focus it if it's already open
+function openLibrary() {
+  const url = chrome.runtime.getURL('src/library/library.html');
+  chrome.tabs.query({ url }).then((tabs) => {
+    if (tabs && tabs.length) {
+      chrome.tabs.update(tabs[0].id, { active: true });
+      chrome.windows.update(tabs[0].windowId, { focused: true });
+    } else {
+      chrome.tabs.create({ url });
+    }
+  }).catch(() => chrome.tabs.create({ url }));
+}
+
+// Clicking the toolbar icon opens the library (there's no popup any more)
+chrome.action.onClicked.addListener(() => openLibrary());
 
 // blob URL -> the filename we want for it
 const pendingNames = new Map();
@@ -52,7 +68,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     toOffscreen({ action: 'offscreen-prebuild', key: msg.key, data: msg.data, tabId });
   }
 
-  // Download this page's files (from the page card or the toolbar popup)
+  // Download this page's files (from the floating panel)
   if (msg.action === 'buildAndDownload') {
     toOffscreen({
       action: 'offscreen-build',
@@ -71,15 +87,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Open (or focus) the full-page library
   if (msg.action === 'open-library') {
-    const url = chrome.runtime.getURL('library.html');
-    chrome.tabs.query({ url }).then((tabs) => {
-      if (tabs && tabs.length) {
-        chrome.tabs.update(tabs[0].id, { active: true });
-        chrome.windows.update(tabs[0].windowId, { focused: true });
-      } else {
-        chrome.tabs.create({ url });
-      }
-    }).catch(() => chrome.tabs.create({ url }));
+    openLibrary();
   }
 
   // Zip up library items and download
@@ -92,10 +100,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     pendingNames.set(msg.url, msg.filename);
     chrome.downloads.download({ url: msg.url, filename: msg.filename, saveAs: false }, () => {
       if (chrome.runtime.lastError) {
+        const err = chrome.runtime.lastError.message;
         pendingNames.delete(msg.url);
-        chrome.runtime
-          .sendMessage({ action: 'offscreen-log', message: 'Download error: ' + chrome.runtime.lastError.message })
-          .catch(() => {});
+        // debug log + red banner on the library page
+        chrome.runtime.sendMessage({ action: 'offscreen-log', message: 'Download error: ' + err }).catch(() => {});
+        chrome.runtime.sendMessage({ action: 'app-error', message: 'Download failed: ' + err }).catch(() => {});
+        // and tell the page that asked, so its panel can show the error
+        if (msg.tabId != null) {
+          chrome.tabs
+            .sendMessage(msg.tabId, { action: 'offscreen-status', kind: 'saved', state: 'error', which: 'error', error: err })
+            .catch(() => {});
+        }
       }
     });
   }

@@ -1,5 +1,8 @@
-// key (page URL) -> { data, tabId, baseName, txtBlob, pdfPromise }
+// key (page URL) -> { data, tabId, baseName, txtBlob, pdfPromise, pdfState }
+// Insertion order = least recently used first. Capped so many open tabs
+// can't pile up blobs (and finished PDFs) in memory forever.
 const cache = new Map();
+const CACHE_MAX = 4;
 
 function log(msg) {
   chrome.runtime.sendMessage({ action: 'offscreen-log', message: msg }).catch(() => {});
@@ -7,6 +10,12 @@ function log(msg) {
 
 function status(tabId, payload) {
   chrome.runtime.sendMessage({ action: 'offscreen-status', tabId, ...payload }).catch(() => {});
+}
+
+// Tells every open extension page (library) that a job started / finished / failed.
+// This replaces the old "Done." log-string trick.
+function job(name, state, error) {
+  chrome.runtime.sendMessage({ action: 'offscreen-job', job: name, state, error }).catch(() => {});
 }
 
 function sanitizeFilename(name) {
@@ -25,6 +34,11 @@ function buildBaseName(data) {
   return combined || `h5p-content-${Date.now()}`;
 }
 
+// Real number of questions (falls back to block count for older data)
+function questionTotal(data) {
+  return typeof data.questionCount === 'number' ? data.questionCount : data.quiz.length;
+}
+
 function buildNotesText(data) {
   const lines = [];
   lines.push(`# ${data.title}`, '');
@@ -41,6 +55,15 @@ function buildNotesText(data) {
         (q.items || []).forEach(item => {
           lines.push(`Q: ${item.question}`);
           (item.answers || []).forEach(a => lines.push(`  - ${a}${a === item.correctAnswer ? '  [CORRECT]' : ''}`));
+          lines.push('');
+        });
+      } else if (q.type === 'Summary') {
+        if (q.intro) lines.push(q.intro, '');
+        (q.items || []).forEach((item) => {
+          lines.push('Q: Pick the correct summary statement.');
+          lines.push(`  - ${item.correct}  [CORRECT]`);
+          (item.wrong || []).forEach(w => lines.push(`  - ${w}`));
+          if (item.tip) lines.push(`  (Tip: ${item.tip})`);
           lines.push('');
         });
       } else if (q.type === 'Blanks') {
@@ -104,6 +127,18 @@ async function buildSlidesPdf(urls, onProgress) {
   return pdf.output('blob');
 }
 
+// Remember the PDF build's latest state on the entry AND tell the page.
+// Remembering it lets us replay it when the same week is opened again
+// (e.g. the tab was reloaded), otherwise the new page would never hear about a finished build.
+function setPdfState(entry, payload) {
+  entry.pdfState = payload;
+  status(entry.tabId, { kind: 'pdf-progress', ...payload });
+}
+
+function replayPdfState(entry) {
+  if (entry.pdfState) status(entry.tabId, { kind: 'pdf-progress', ...entry.pdfState });
+}
+
 // Starts (or restarts) the PDF build for a cache entry.
 function startPdf(entry) {
   const urls = dedupeConsecutive(entry.data.images || []);
@@ -111,18 +146,18 @@ function startPdf(entry) {
     entry.pdfPromise = Promise.resolve(null);
     return;
   }
-  status(entry.tabId, { kind: 'pdf-progress', state: 'building', done: 0, total: urls.length });
+  setPdfState(entry, { state: 'building', done: 0, total: urls.length });
 
   entry.pdfPromise = buildSlidesPdf(urls, (done, total) =>
-    status(entry.tabId, { kind: 'pdf-progress', state: 'building', done, total })
+    setPdfState(entry, { state: 'building', done, total })
   )
     .then((blob) => {
-      status(entry.tabId, { kind: 'pdf-progress', state: 'ready', done: urls.length, total: urls.length });
+      setPdfState(entry, { state: 'ready', done: urls.length, total: urls.length });
       return blob;
     })
     .catch((err) => {
       entry.pdfPromise = null; // allow a retry on the next request
-      status(entry.tabId, { kind: 'pdf-progress', state: 'error', error: err.message });
+      setPdfState(entry, { state: 'error', error: err.message });
       throw err;
     });
 
@@ -132,6 +167,9 @@ function startPdf(entry) {
 function getEntry(key, data, tabId) {
   let entry = cache.get(key);
   if (entry) {
+    // mark as most recently used
+    cache.delete(key);
+    cache.set(key, entry);
     if (tabId != null) entry.tabId = tabId;
     return entry;
   }
@@ -141,18 +179,24 @@ function getEntry(key, data, tabId) {
     baseName: buildBaseName(data),
     txtBlob: new Blob([buildNotesText(data)], { type: 'text/plain' }),
     pdfPromise: null,
+    pdfState: null,
   };
   cache.set(key, entry);
+  // Evict the least recently used entries. If one is needed again, the next
+  // request rebuilds it from the data the page sends along.
+  while (cache.size > CACHE_MAX) {
+    cache.delete(cache.keys().next().value);
+  }
   startPdf(entry);
   return entry;
 }
 
 // Offscreen documents can't use chrome.downloads, so we hand the blob URL
 // to background.js, which starts the actual download.
-function downloadBlob(blob, filename, keepMs = 60000) {
+function downloadBlob(blob, filename, keepMs = 60000, tabId) {
   const url = URL.createObjectURL(blob);
   return chrome.runtime
-    .sendMessage({ action: 'offscreen-download', url, filename })
+    .sendMessage({ action: 'offscreen-download', url, filename, tabId })
     .catch(() => {})
     .then(() => {
       setTimeout(() => URL.revokeObjectURL(url), keepMs);
@@ -166,11 +210,11 @@ async function handleBuild(msg) {
   const data = entry.data;
   const kind = msg.kind || 'both';
 
-  log(`Found: ${data.notes.length} note block(s), ${data.quiz.length} question(s), ${data.images.length} image(s).`);
+  log(`Found: ${data.notes.length} note block(s), ${questionTotal(data)} question(s), ${data.images.length} image(s).`);
   log(`Filename: ${entry.baseName}`);
 
   if (kind === 'txt' || kind === 'both') {
-    await downloadBlob(entry.txtBlob, `${entry.baseName}.txt`);
+    await downloadBlob(entry.txtBlob, `${entry.baseName}.txt`, 60000, entry.tabId);
     log(`Downloaded: ${entry.baseName}.txt`);
     status(entry.tabId, { kind: 'saved', which: 'txt' });
   }
@@ -180,12 +224,11 @@ async function handleBuild(msg) {
     log('Preparing slides.pdf…');
     const pdfBlob = await entry.pdfPromise;
     if (pdfBlob) {
-      await downloadBlob(pdfBlob, `${entry.baseName}.pdf`);
+      await downloadBlob(pdfBlob, `${entry.baseName}.pdf`, 60000, entry.tabId);
       log(`Downloaded: ${entry.baseName}.pdf`);
       status(entry.tabId, { kind: 'saved', which: 'pdf' });
     }
   }
-  log('Done.');
 }
 
 async function handleLibraryAdd(msg) {
@@ -211,7 +254,7 @@ async function handleLibraryAdd(msg) {
     weekLabel: data.weekLabel || '',
     title: data.title || '',
     notes: data.notes.length,
-    quiz: data.quiz.length,
+    quiz: questionTotal(data),
     slides: dedupeConsecutive(data.images || []).length,
     partIndex: data.partIndex || null,
     partTotal: data.partTotal || null,
@@ -219,7 +262,6 @@ async function handleLibraryAdd(msg) {
   };
   status(entry.tabId, { kind: 'library', state: 'saved', meta });
   log(`Saved to library: ${entry.baseName}`);
-  log('Done.');
 }
 
 async function handleZip(msg) {
@@ -242,7 +284,6 @@ async function handleZip(msg) {
 
   if (!added) {
     log('Nothing to zip.');
-    log('Done.');
     return;
   }
 
@@ -250,13 +291,14 @@ async function handleZip(msg) {
   const blob = await zip.generateAsync({ type: 'blob', compression: 'STORE' }); // PDFs are already compressed
   await downloadBlob(blob, msg.zipName || 'H5P library.zip', 300000);
   log(`Downloaded: ${msg.zipName}`);
-  log('Done.');
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
   // Build in the background as soon as the page is detected
   if (msg.action === 'offscreen-prebuild') {
-    getEntry(msg.key || msg.data.title, msg.data, msg.tabId);
+    const entry = getEntry(msg.key || msg.data.title, msg.data, msg.tabId);
+    // a reloaded page starts with a fresh "Preparing…" button: tell it where the build is now
+    replayPdfState(entry);
     return;
   }
 
@@ -268,14 +310,18 @@ chrome.runtime.onMessage.addListener((msg) => {
   const handler = handlers[msg.action];
   if (!handler) return;
 
+  const jobName = { 'offscreen-build': 'download', 'offscreen-library-add': 'library', 'offscreen-zip': 'zip' }[msg.action];
+
   (async () => {
+    job(jobName, 'start');
     try {
       await handler(msg);
+      job(jobName, 'done');
     } catch (e) {
       log('Error: ' + e.message);
-      log('Done.'); // re-enables the popup buttons
+      job(jobName, 'error', e.message);
       if (msg.tabId != null) {
-        status(msg.tabId, { kind: msg.action === 'offscreen-library-add' ? 'library' : 'saved', state: 'error', which: 'error' });
+        status(msg.tabId, { kind: msg.action === 'offscreen-library-add' ? 'library' : 'saved', state: 'error', which: 'error', error: e.message });
       }
     }
   })();

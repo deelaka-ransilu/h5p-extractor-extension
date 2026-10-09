@@ -1,38 +1,73 @@
-// Library list, selection, remove, zip. Loaded by popup.html and library.html.
+// The library page: list, selection, remove, zip, settings, error banner.
+// Loaded only by library.html (the popup no longer exists).
 (() => {
   const $ = (id) => document.getElementById(id);
   const listEl = $('libList');
   if (!listEl) return;
   const zipSelBtn = $('zipSelBtn'), zipAllBtn = $('zipAllBtn'), rmSelBtn = $('rmSelBtn');
   const searchEl = $('libSearch'), storageEl = $('storageInfo'), logEl = $('log');
-  const isFull = document.body.classList.contains('full');
+  const bannerEl = $('banner'), bannerText = $('bannerText'), bannerClose = $('bannerClose');
+  const optCard = $('optCard'), optDebug = $('optDebug');
 
   let items = [];
-  let busy = false;
+  let jobs = 0;          // offscreen jobs currently running
+  let zipping = false;   // a zip was requested and hasn't finished yet
+  let startTimer = null; // safety net: the zip job never started
   let query = '';
   let rmArmed = false;
   let rmTimer = null;
   const selected = new Set();
 
-  /* ---------- shared log (popup.js uses this too) ---------- */
-  const hooks = { onDone: null };
-  function log(msg, isError, reset) {
-    if (!logEl) return;
-    if (reset) logEl.textContent = '';
-    logEl.hidden = false;
+  const isBusy = () => jobs > 0 || zipping;
+
+  /* ---------- error banner ---------- */
+  function showError(text) {
+    bannerText.textContent = text;
+    bannerEl.hidden = false;
+  }
+  function hideError() {
+    bannerEl.hidden = true;
+  }
+  setBtn(bannerClose, 'x', null);
+  bannerClose.addEventListener('click', hideError);
+
+  /* ---------- debug log (hidden unless switched on in Settings) ---------- */
+  function log(msg, isError) {
     logEl.classList.toggle('error', !!isError);
     logEl.textContent += msg + '\n';
     logEl.scrollTop = logEl.scrollHeight;
   }
-  window.H5PLog = { log, hooks };
 
+  /* ---------- messages from the offscreen document / background ---------- */
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.action !== 'offscreen-log') return;
-    log(msg.message, msg.message.startsWith('Error') || msg.message.startsWith('Download error'));
-    if (msg.message === 'Done.') {
-      busy = false;
+    // plain progress text -> debug log only
+    if (msg.action === 'offscreen-log') {
+      log(msg.message, msg.message.startsWith('Error') || msg.message.startsWith('Download error'));
+      return;
+    }
+
+    // something failed outside a job (e.g. Chrome refused a download)
+    if (msg.action === 'app-error') {
+      zipping = false;
+      showError(msg.message || 'Something went wrong.');
       updateButtons();
-      if (hooks.onDone) hooks.onDone();
+      return;
+    }
+
+    // job lifecycle: start -> done | error
+    if (msg.action === 'offscreen-job') {
+      if (msg.state === 'start') {
+        jobs++;
+        clearTimeout(startTimer);
+        hideError();
+      } else {
+        jobs = Math.max(0, jobs - 1);
+        if (msg.state === 'error') {
+          showError(msg.error ? 'Something went wrong: ' + msg.error : 'Something went wrong. Please try again.');
+        }
+      }
+      if (jobs === 0) zipping = false;
+      updateButtons();
     }
   });
 
@@ -125,29 +160,41 @@
   }
 
   function zip(list) {
-    if (!list.length) return;
+    if (!list.length || isBusy()) return;
     const subjects = new Set(list.map((i) => i.subject || 'Other'));
     const zipName = sanitize(subjects.size === 1 ? `${[...subjects][0]} - H5P content` : 'H5P library') + '.zip';
-    busy = true;
+    zipping = true; // locked right away; the job messages take over once it starts
+    hideError();
     updateButtons();
-    log(`Zipping ${list.length} week(s)…`, false, true);
+    log(`Zipping ${list.length} week(s)…`);
     chrome.runtime.sendMessage({
       action: 'library-zip',
       zipName,
       items: list.map((i) => ({ id: i.id, folder: sanitize(i.subject) || 'H5P', fileBase: i._base })),
     });
+    // if nothing picked the job up, don't stay locked forever
+    clearTimeout(startTimer);
+    startTimer = setTimeout(() => {
+      if (jobs === 0 && zipping) {
+        zipping = false;
+        showError("Couldn't start the download. Please try again.");
+        updateButtons();
+      }
+    }, 5000);
   }
 
   /* ---------- drawing ---------- */
   function updateButtons() {
     const n = selected.size;
-    document.querySelectorAll('[data-lib-count]').forEach((e) => { e.textContent = items.length ? `(${items.length})` : ''; });
+    const busy = isBusy();
     if (zipSelBtn) {
-      setBtn(zipSelBtn, 'archive', `Download selected (${n})`);
+      if (zipping) setBtn(zipSelBtn, 'archive', 'Zipping…');
+      else setBtn(zipSelBtn, 'archive', `Download selected (${n})`);
       zipSelBtn.disabled = busy || n === 0;
     }
     if (zipAllBtn) {
-      setBtn(zipAllBtn, 'download', 'Download all as zip');
+      if (zipping) setBtn(zipAllBtn, 'download', 'Zipping…');
+      else setBtn(zipAllBtn, 'download', 'Download all as zip');
       zipAllBtn.disabled = busy || items.length === 0;
     }
     if (rmSelBtn) {
@@ -163,7 +210,7 @@
 
     if (!items.length) {
       const empty = h('div', 'empty');
-      empty.append(icon('library', 28), h('div', null, 'Your library is empty. Open an H5P page and click “Add to library”. Saved weeks stay here so you can download them all later.'));
+      empty.append(icon('library', 28), h('div', null, 'Your library is empty. Open an H5P page on online.codl.lk, click the green button, then “Add to library”. Saved weeks stay here so you can download them all later.'));
       listEl.appendChild(empty);
       updateButtons();
       return;
@@ -219,7 +266,7 @@
 
         const text = h('div', 'text');
         let subText = `${it.notes} notes · ${it.quiz} questions · ${it.slides} slides`;
-        if (isFull && it.savedAt) {
+        if (it.savedAt) {
           subText += ' · saved ' + new Date(it.savedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
         }
         text.append(h('div', 'name', it._label), h('div', 'sub', subText));
@@ -249,35 +296,59 @@
     draw();
     updateStorage();
   }
-  window.H5PLibrary = { refresh };
+
+  /* ---------- settings ---------- */
+  function applyDebug() {
+    logEl.hidden = !optDebug.checked;
+  }
+
+  async function loadSettings() {
+    try {
+      const s = await chrome.storage.sync.get(['autoCard', 'debugLog']);
+      optCard.checked = s.autoCard !== false; // on by default
+      optDebug.checked = s.debugLog === true; // off by default
+    } catch (e) {
+      optCard.checked = true;
+      optDebug.checked = false;
+    }
+    applyDebug();
+  }
+
+  optCard.addEventListener('change', () => chrome.storage.sync.set({ autoCard: optCard.checked }));
+  optDebug.addEventListener('change', () => {
+    chrome.storage.sync.set({ debugLog: optDebug.checked });
+    applyDebug();
+  });
 
   /* ---------- wiring ---------- */
-  if (zipSelBtn) zipSelBtn.addEventListener('click', () => zip(items.filter((i) => selected.has(i.id))));
-  if (zipAllBtn) zipAllBtn.addEventListener('click', () => zip(items));
-  if (rmSelBtn) {
-    rmSelBtn.addEventListener('click', () => {
-      if (!selected.size) return;
-      if (!rmArmed) {
-        rmArmed = true;
-        clearTimeout(rmTimer);
-        rmTimer = setTimeout(() => { rmArmed = false; updateButtons(); }, 3500);
-        updateButtons();
-      } else {
-        rmArmed = false;
-        clearTimeout(rmTimer);
-        removeIds(Array.from(selected));
-      }
-    });
-  }
-  if (searchEl) {
-    const wrap = searchEl.parentElement;
-    if (wrap) wrap.prepend(icon('search', 15));
-    searchEl.addEventListener('input', () => { query = searchEl.value.trim(); draw(); });
-  }
+  zipSelBtn.addEventListener('click', () => zip(items.filter((i) => selected.has(i.id))));
+  zipAllBtn.addEventListener('click', () => zip(items));
+  rmSelBtn.addEventListener('click', () => {
+    if (!selected.size) return;
+    if (!rmArmed) {
+      rmArmed = true;
+      clearTimeout(rmTimer);
+      rmTimer = setTimeout(() => { rmArmed = false; updateButtons(); }, 3500);
+      updateButtons();
+    } else {
+      rmArmed = false;
+      clearTimeout(rmTimer);
+      removeIds(Array.from(selected));
+    }
+  });
+
+  const wrap = searchEl.parentElement;
+  if (wrap) wrap.prepend(icon('search', 15));
+  searchEl.addEventListener('input', () => { query = searchEl.value.trim(); draw(); });
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.library) refresh();
+    if (area === 'sync') {
+      if (changes.autoCard) optCard.checked = changes.autoCard.newValue !== false;
+      if (changes.debugLog) { optDebug.checked = changes.debugLog.newValue === true; applyDebug(); }
+    }
   });
 
+  loadSettings();
   refresh();
 })();
