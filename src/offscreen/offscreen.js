@@ -1,11 +1,17 @@
 // The offscreen document: keeps built files in memory, runs the download / library / zip jobs
 // and reports progress. Builders live in build.js; shared helpers in shared/utils.js.
 
-// key (page URL) -> { data, tabId, baseName, txtBlob, pdfPromise, pdfState }
+// key (page URL) -> { data, tabId, baseName, txtBlob, pdfPromise, pdfJob, pdfState }
 // Insertion order = least recently used first. Capped so many open tabs
 // can't pile up blobs (and finished PDFs) in memory forever.
 const cache = new Map();
 const CACHE_MAX = 4;
+
+// PDF builds are queued: at most PDF_MAX run at once, the rest wait first-in-first-out.
+// A manual click (Download / Add to library) moves that week to the front of the queue.
+const PDF_MAX = 2;
+const pdfQueue = [];
+let pdfRunning = 0;
 
 function log(msg) {
   chrome.runtime.sendMessage({ action: 'offscreen-log', message: msg }).catch(() => {});
@@ -32,30 +38,118 @@ function replayPdfState(entry) {
   if (entry.pdfState) sendStatus(entry.tabId, { kind: 'pdf-progress', ...entry.pdfState });
 }
 
-// Starts (or restarts) the PDF build for a cache entry.
-function startPdf(entry) {
+/* ---------------- PDF queue ---------------- */
+
+// Queues the PDF build for a cache entry. priority = a person clicked something for this week.
+function startPdf(entry, priority) {
   const urls = H5PUtils.dedupeConsecutive(entry.data.images || []);
   if (!urls.length) {
     entry.pdfPromise = Promise.resolve(null);
     return;
   }
-  setPdfState(entry, { state: 'building', done: 0, total: urls.length });
 
-  entry.pdfPromise = buildSlidesPdf(urls, (done, total) =>
-    setPdfState(entry, { state: 'building', done, total })
-  )
-    .then((blob) => {
-      setPdfState(entry, { state: 'ready', done: urls.length, total: urls.length });
-      return blob;
-    })
-    .catch((err) => {
-      entry.pdfPromise = null; // allow a retry on the next request
-      setPdfState(entry, { state: 'error', error: err.message });
-      throw err;
-    });
+  let resolveFn;
+  let rejectFn;
+  entry.pdfPromise = new Promise((res, rej) => {
+    resolveFn = res;
+    rejectFn = rej;
+  });
+  entry.pdfPromise.catch(() => {}); // avoid an unhandled-rejection warning if nobody awaits it
 
-  entry.pdfPromise.catch(() => {}); // avoid an unhandled-rejection warning if nobody awaits it yet
+  const pdfJob = { entry, urls, resolve: resolveFn, reject: rejectFn, started: false, manual: !!priority };
+  entry.pdfJob = pdfJob;
+  setPdfState(entry, { state: 'queued' });
+
+  if (priority) pdfQueue.unshift(pdfJob);
+  else pdfQueue.push(pdfJob);
+  pumpPdfQueue();
 }
+
+function pumpPdfQueue() {
+  while (pdfRunning < PDF_MAX && pdfQueue.length) {
+    runPdfJob(pdfQueue.shift());
+  }
+}
+
+// Builds the PDF. If it throws, or some slide images couldn't be loaded, it tries once more.
+async function runPdfJob(pdfJob) {
+  const { entry, urls } = pdfJob;
+  pdfRunning++;
+  pdfJob.started = true;
+  try {
+    let result = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      setPdfState(entry, { state: 'building', done: 0, total: urls.length });
+      try {
+        result = await buildSlidesPdf(urls, (done, total) =>
+          setPdfState(entry, { state: 'building', done, total })
+        );
+        if (!result.skipped) break;
+        if (attempt === 1) log(`${result.skipped} slide image(s) failed to load, retrying once…`);
+      } catch (e) {
+        if (attempt === 2) throw e;
+        log('PDF build failed, retrying once: ' + e.message);
+      }
+    }
+    entry.pdfJob = null;
+    setPdfState(entry, {
+      state: 'ready',
+      done: urls.length,
+      total: urls.length,
+      skipped: result.skipped,
+      incomplete: result.skipped > 0,
+    });
+    pdfJob.resolve(result.blob);
+  } catch (err) {
+    entry.pdfPromise = null; // allow a retry on the next request
+    entry.pdfJob = null;
+    setPdfState(entry, { state: 'error', error: err.message });
+    pdfJob.reject(err);
+  } finally {
+    pdfRunning--;
+    pumpPdfQueue();
+  }
+}
+
+// A person clicked something for this week: move its queued build to the front.
+function prioritize(entry) {
+  const pdfJob = entry.pdfJob;
+  if (!pdfJob || pdfJob.started) return;
+  pdfJob.manual = true;
+  const i = pdfQueue.indexOf(pdfJob);
+  if (i > 0) {
+    pdfQueue.splice(i, 1);
+    pdfQueue.unshift(pdfJob);
+  }
+}
+
+// autoSave was switched off: forget builds that were only waiting in the queue.
+// Weeks a person clicked on (manual) stay queued. Cleared weeks go back to "Download",
+// which builds on demand.
+function clearPdfQueue() {
+  for (let i = pdfQueue.length - 1; i >= 0; i--) {
+    const pdfJob = pdfQueue[i];
+    if (pdfJob.manual) continue;
+    pdfQueue.splice(i, 1);
+    pdfJob.entry.pdfPromise = null;
+    pdfJob.entry.pdfJob = null;
+    setPdfState(pdfJob.entry, { state: 'idle' });
+    pdfJob.reject(new Error('Queue cleared'));
+  }
+}
+
+// An entry is leaving the cache: don't keep a build for it waiting in the queue.
+function dropQueuedJob(entry) {
+  const pdfJob = entry.pdfJob;
+  if (!pdfJob || pdfJob.started || pdfJob.manual) return;
+  const i = pdfQueue.indexOf(pdfJob);
+  if (i >= 0) pdfQueue.splice(i, 1);
+  entry.pdfPromise = null;
+  entry.pdfJob = null;
+  pdfJob.reject(new Error('Evicted'));
+}
+
+/* ---------------- cache ---------------- */
 
 function getEntry(key, data, tabId) {
   let entry = cache.get(key);
@@ -72,13 +166,16 @@ function getEntry(key, data, tabId) {
     baseName: buildBaseName(data),
     txtBlob: new Blob([buildNotesText(data)], { type: 'text/plain' }),
     pdfPromise: null,
+    pdfJob: null,
     pdfState: null,
   };
   cache.set(key, entry);
   // Evict the least recently used entries. If one is needed again, the next
   // request rebuilds it from the data the page sends along.
   while (cache.size > CACHE_MAX) {
-    cache.delete(cache.keys().next().value);
+    const oldestKey = cache.keys().next().value;
+    dropQueuedJob(cache.get(oldestKey));
+    cache.delete(oldestKey);
   }
   startPdf(entry);
   return entry;
@@ -113,7 +210,8 @@ async function handleBuild(msg) {
   }
 
   if ((kind === 'pdf' || kind === 'both') && data.images.length) {
-    if (!entry.pdfPromise) startPdf(entry);
+    if (!entry.pdfPromise) startPdf(entry, true);
+    else prioritize(entry);
     log('Preparing slides.pdf…');
     const pdfBlob = await entry.pdfPromise;
     if (pdfBlob) {
@@ -132,7 +230,8 @@ async function handleLibraryAdd(msg) {
 
   let pdfBlob = null;
   if (data.images.length) {
-    if (!entry.pdfPromise) startPdf(entry);
+    if (!entry.pdfPromise) startPdf(entry, true);
+    else prioritize(entry);
     pdfBlob = await entry.pdfPromise; // the background build usually finished already
   }
 
@@ -151,6 +250,8 @@ async function handleLibraryAdd(msg) {
     slides: H5PUtils.dedupeConsecutive(data.images || []).length,
     partIndex: data.partIndex || null,
     partTotal: data.partTotal || null,
+    hash: H5PUtils.hashContent(data),
+    bytes: entry.txtBlob.size + (pdfBlob ? pdfBlob.size : 0),
     savedAt: Date.now(),
   };
   sendStatus(entry.tabId, { kind: 'library', state: 'saved', meta });
@@ -187,11 +288,19 @@ async function handleZip(msg) {
 }
 
 chrome.runtime.onMessage.addListener((msg) => {
-  // Build in the background as soon as the page is detected
+  // Build in the background as soon as the page is detected (or autoSave was switched on)
   if (msg.action === 'offscreen-prebuild') {
     const entry = getEntry(msg.key || msg.data.title, msg.data, msg.tabId);
-    // a reloaded page starts with a fresh "Preparing…" button: tell it where the build is now
-    replayPdfState(entry);
+    // idle / failed earlier: queue it again. Otherwise a reloaded page starts with a fresh
+    // "Preparing…" button, so tell it where the build is now.
+    if (!entry.pdfPromise) startPdf(entry);
+    else replayPdfState(entry);
+    return;
+  }
+
+  // autoSave was switched off
+  if (msg.action === 'offscreen-clear-queue') {
+    clearPdfQueue();
     return;
   }
 

@@ -8,6 +8,9 @@ let teardown = null; // removes the document/window listeners added while the bu
 // Where the floating button lives: which edge, and how far down (0 = top, 1 = bottom)
 let fabPos = { side: 'right', y: 0.85 };
 
+// The autoSave setting (kept up to date by main.js)
+let autoSaveOn = false;
+
 const FAB = 46;   // button size
 const EDGE = 12;  // gap between the button and the screen edge
 
@@ -63,6 +66,16 @@ function ensureFont() {
       chrome.runtime.getURL('assets/fonts/SpaceGrotesk.woff2') +
       "') format('woff2');font-weight:300 700;font-display:swap;}";
     document.head.appendChild(s);
+  } catch (e) {}
+}
+
+// A person added this week by hand, so it's no longer "removed" as far as autoSave is concerned
+async function clearRemoved(id) {
+  try {
+    const { removedIds = [] } = await chrome.storage.local.get('removedIds');
+    if (removedIds.includes(id)) {
+      await chrome.storage.local.set({ removedIds: removedIds.filter((x) => x !== id) });
+    }
   } catch (e) {}
 }
 
@@ -153,6 +166,8 @@ function showCard(data) {
   const hasSlides = slideCount > 0;
   if (!hasText && !hasSlides) return;
 
+  const currentHash = H5PUtils.hashContent(data);
+
   ensureFont();
 
   hostEl = document.createElement('div');
@@ -217,6 +232,11 @@ function showCard(data) {
   let pdfFill = null;
   let pdfBar = null;
 
+  // autoSave bookkeeping for this page
+  let pdfReady = false;       // the PDF build finished
+  let pdfIncomplete = false;  // ...but some slide images couldn't be loaded
+  let autoStarted = false;    // autoSave already sent this week to the library
+
   if (hasText) {
     const row = el('div', 'row');
     const ib = el('span', 'ib');
@@ -271,6 +291,13 @@ function showCard(data) {
     panel.appendChild(bothBtn);
   }
 
+  // Amber notes about the library (hidden until needed)
+  const changeNote = el('p', 'warn', 'Content changed on the LMS since you saved this week. Update your library copy?');
+  changeNote.hidden = true;
+  const sizeNote = el('p', 'warn', 'Your library is over 200 MB. You can remove old weeks from the library page.');
+  sizeNote.hidden = true;
+  panel.append(changeNote, sizeNote);
+
   const actions = el('div', 'actions');
   const libBtn = el('button', 'btn grow');
   setBtn(libBtn, 'plus', 'Add to library');
@@ -278,6 +305,8 @@ function showCard(data) {
     clearErr();
     libBtn.disabled = true;
     setBtn(libBtn, null, 'Saving…');
+    autoStarted = true; // a manual save counts: autoSave must not fire a second one
+    clearRemoved(data.id);
     safeSend({ action: 'library-add', key: data.key, data });
   });
   const openBtn = el('button', 'btn');
@@ -437,14 +466,42 @@ function showCard(data) {
   async function refreshLib() {
     try {
       const { library = {} } = await chrome.storage.local.get('library');
-      const saved = !!library[data.id];
-      const count = Object.keys(library).length;
-      setBtn(libBtn, saved ? 'check' : 'plus', saved ? 'In library' : 'Add to library');
-      libBtn.title = saved ? 'Click to update this week in your library' : '';
-      libBtn.classList.toggle('inlib', saved);
+      const meta = library[data.id];
+      const saved = !!meta;
+      // Weeks saved before v1.6 have no hash, so we can't tell and don't nag
+      const changed = saved && !!meta.hash && meta.hash !== currentHash;
+      const metas = Object.values(library);
+      const totalBytes = metas.reduce((n, m) => n + (m.bytes || 0), 0);
+
+      if (changed) {
+        setBtn(libBtn, 'plus', 'Update');
+        libBtn.title = 'Replace the saved copy with what is on this page now';
+      } else {
+        setBtn(libBtn, saved ? 'check' : 'plus', saved ? 'In library' : 'Add to library');
+        libBtn.title = saved ? 'Click to update this week in your library' : '';
+      }
+      libBtn.classList.toggle('inlib', saved && !changed);
       libBtn.disabled = false;
-      setBtn(openBtn, 'library', count ? String(count) : '');
+      changeNote.hidden = !changed;
+      sizeNote.hidden = totalBytes <= H5PUtils.LIB_WARN_BYTES;
+      setBtn(openBtn, 'library', metas.length ? String(metas.length) : '');
       badge.classList.toggle('on', saved);
+    } catch (e) {}
+  }
+
+  // autoSave: save this week once everything that can be extracted has finished building.
+  // Never overwrites a saved week, and skips weeks the person removed on purpose.
+  async function maybeAutoSave() {
+    if (!autoSaveOn || autoStarted) return;
+    if (hasSlides && (!pdfReady || pdfIncomplete)) return;
+    try {
+      const { library = {}, removedIds = [] } = await chrome.storage.local.get(['library', 'removedIds']);
+      if (library[data.id] || removedIds.includes(data.id)) return;
+      if (!autoSaveOn || autoStarted) return; // changed while we were reading storage
+      autoStarted = true;
+      libBtn.disabled = true;
+      setBtn(libBtn, null, 'Saving…');
+      safeSend({ action: 'library-add', key: data.key, data });
     } catch (e) {}
   }
 
@@ -454,24 +511,61 @@ function showCard(data) {
       placeFab();
       if (open) positionPanel();
     },
+    // autoSave was ticked or unticked in the library settings
+    autoSaveChanged() {
+      if (!autoSaveOn) return;
+      // the queue may have been cleared while it was off: make sure the build is queued again
+      if (hasSlides && !pdfReady) safeSend({ action: 'prebuild', key: data.key, data });
+      maybeAutoSave();
+    },
     update(msg) {
       if (msg.kind === 'pdf-progress' && pdfBtn) {
-        if (msg.state === 'building') {
-          const pct = msg.total ? Math.round((msg.done / msg.total) * 100) : 0;
-          pdfFill.style.width = pct + '%';
-          setBtn(pdfBtn, null, `Preparing ${msg.done}/${msg.total}`);
+        if (msg.state === 'queued') {
+          pdfReady = false;
+          pdfFill.style.width = '0';
+          pdfBar.style.display = '';
+          setBtn(pdfBtn, null, 'Queued…');
           pdfBtn.classList.add('busy');
-        } else if (msg.state === 'ready') {
+        } else if (msg.state === 'idle') {
+          // the queue was cleared (autoSave switched off): clicking Download builds it on demand
+          pdfReady = false;
+          pdfFill.style.width = '0';
           pdfBar.style.display = 'none';
           setBtn(pdfBtn, 'download', 'Download');
           pdfBtn.classList.remove('busy');
+          pdfBtn.disabled = false;
+        } else if (msg.state === 'building') {
+          pdfReady = false;
+          const pct = msg.total ? Math.round((msg.done / msg.total) * 100) : 0;
+          pdfBar.style.display = '';
+          pdfFill.style.width = pct + '%';
+          pdfMeta.textContent = `${slideCount} slides`;
+          pdfMeta.classList.remove('err');
+          setBtn(pdfBtn, null, `Preparing ${msg.done}/${msg.total}`);
+          pdfBtn.classList.add('busy');
+        } else if (msg.state === 'ready') {
+          pdfReady = true;
+          pdfIncomplete = !!msg.incomplete;
+          pdfBar.style.display = 'none';
+          setBtn(pdfBtn, 'download', 'Download');
+          pdfBtn.classList.remove('busy');
+          if (pdfIncomplete) {
+            pdfMeta.textContent = `${slideCount} slides · ${msg.skipped} couldn't load`;
+            pdfMeta.classList.add('err');
+            if (autoSaveOn && !autoStarted) {
+              showErr(`Auto-save skipped: ${msg.skipped} slide image(s) couldn't load. Use "Add to library" to save it anyway.`);
+            }
+          }
+          maybeAutoSave();
         } else if (msg.state === 'error') {
+          pdfReady = false;
           pdfBar.style.display = 'none';
           pdfMeta.textContent = "Couldn't build the PDF";
           pdfMeta.classList.add('err');
           setBtn(pdfBtn, null, 'Retry');
           pdfBtn.classList.remove('busy');
           pdfBtn.disabled = false;
+          if (autoSaveOn && !autoStarted) showErr("Auto-save skipped: the PDF couldn't be built. Use Retry, then Add to library.");
         }
       }
       if (msg.kind === 'saved') {
@@ -495,7 +589,8 @@ function showCard(data) {
     },
   };
 
-  refreshLib();
+  // Text-only weeks have no PDF to wait for, so autoSave can run as soon as the library state is read
+  refreshLib().then(() => { if (!hasSlides) maybeAutoSave(); });
 
   // Start building the files in the background so they're ready on click
   safeSend({ action: 'prebuild', key: data.key, data });

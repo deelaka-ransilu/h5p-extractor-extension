@@ -14,8 +14,9 @@ async function onDetected(data) {
   safeSend({ action: 'h5p-detected' });
   let autoCard = true;
   try {
-    const stored = await chrome.storage.sync.get('autoCard');
+    const stored = await chrome.storage.sync.get(['autoCard', 'autoSave']);
     if (stored.autoCard === false) autoCard = false;
+    autoSaveOn = stored.autoSave === true; // off by default
   } catch (e) {}
   if (autoCard) {
     await loadFabPos();
@@ -48,6 +49,11 @@ try {
     if (area === 'sync' && changes.autoCard) {
       if (changes.autoCard.newValue === false) hideCard();
       else if (cachedData) loadFabPos().then(() => showCard(cachedData));
+    }
+    // autoSave ticked / unticked: applies to this open page straight away
+    if (area === 'sync' && changes.autoSave) {
+      autoSaveOn = changes.autoSave.newValue === true;
+      if (ui) ui.autoSaveChanged();
     }
     // another tab moved the button: follow it
     if (area === 'sync' && changes.fabPos && changes.fabPos.newValue) {

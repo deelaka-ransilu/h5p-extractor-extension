@@ -9,6 +9,29 @@
   const bannerEl = $('banner'), bannerText = $('bannerText'), bannerClose = $('bannerClose');
   const optCard = $('optCard'), optDebug = $('optDebug');
 
+  // The autoSave checkbox: library.html has no row for it, so copy the look of the
+  // "Show the floating button" row and put the copy right under it.
+  const optAuto = (() => {
+    try {
+      const src = optCard.closest('label') || optCard.parentElement;
+      const row = src.cloneNode(true);
+      row.querySelectorAll('[id]').forEach((n) => n.removeAttribute('id'));
+      const input = row.querySelector('input');
+      if (!input) return null;
+      input.id = 'optAuto';
+      input.checked = false;
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      let last = null, node;
+      while ((node = walker.nextNode())) if (node.nodeValue.trim()) last = node;
+      if (last) last.nodeValue = 'Auto-save weeks to my library';
+      row.title = 'Saves each week automatically once its files are ready. Weeks you remove are not saved again.';
+      src.after(row);
+      return input;
+    } catch (e) {
+      return null;
+    }
+  })();
+
   let items = [];
   let jobs = 0;          // offscreen jobs currently running
   let zipping = false;   // a zip was requested and hasn't finished yet
@@ -152,7 +175,14 @@
     for (const id of ids) {
       try { await H5PDB.del(id); } catch (e) {}
     }
-    const { library = {} } = await chrome.storage.local.get('library');
+    // Remember what was removed on purpose so autoSave doesn't put it straight back.
+    // Written BEFORE the library changes, because an open H5P page reacts to that change.
+    const stored = await chrome.storage.local.get(['library', 'removedIds']);
+    const removed = new Set(stored.removedIds || []);
+    ids.forEach((id) => removed.add(id));
+    await chrome.storage.local.set({ removedIds: Array.from(removed) });
+
+    const library = stored.library || {};
     ids.forEach((id) => { delete library[id]; selected.delete(id); });
     await chrome.storage.local.set({ library }); // storage.onChanged re-renders
   }
@@ -281,11 +311,16 @@
     updateButtons();
   }
 
+  // "3.1 MB stored", turning amber with a note once the library passes about 200 MB (saving never stops)
   async function updateStorage() {
     if (!storageEl || !navigator.storage || !navigator.storage.estimate) return;
     try {
       const { usage = 0 } = await navigator.storage.estimate();
-      storageEl.textContent = `${(usage / 1048576).toFixed(usage > 1e8 ? 0 : 1)} MB stored`;
+      const over = usage > H5PUtils.LIB_WARN_BYTES;
+      storageEl.textContent =
+        `${(usage / 1048576).toFixed(usage > 1e8 ? 0 : 1)} MB stored` + (over ? ' · over 200 MB' : '');
+      storageEl.style.color = over ? '#F0B429' : '';
+      storageEl.title = over ? 'Your library is getting large. Remove old weeks to free space.' : '';
     } catch (e) {}
   }
 
@@ -302,12 +337,14 @@
 
   async function loadSettings() {
     try {
-      const s = await chrome.storage.sync.get(['autoCard', 'debugLog']);
+      const s = await chrome.storage.sync.get(['autoCard', 'debugLog', 'autoSave']);
       optCard.checked = s.autoCard !== false; // on by default
       optDebug.checked = s.debugLog === true; // off by default
+      if (optAuto) optAuto.checked = s.autoSave === true; // off by default
     } catch (e) {
       optCard.checked = true;
       optDebug.checked = false;
+      if (optAuto) optAuto.checked = false;
     }
     applyDebug();
   }
@@ -317,6 +354,7 @@
     chrome.storage.sync.set({ debugLog: optDebug.checked });
     applyDebug();
   });
+  if (optAuto) optAuto.addEventListener('change', () => chrome.storage.sync.set({ autoSave: optAuto.checked }));
 
   /* ---------- wiring ---------- */
   zipSelBtn.addEventListener('click', () => zip(items.filter((i) => selected.has(i.id))));
@@ -344,6 +382,7 @@
     if (area === 'sync') {
       if (changes.autoCard) optCard.checked = changes.autoCard.newValue !== false;
       if (changes.debugLog) { optDebug.checked = changes.debugLog.newValue === true; applyDebug(); }
+      if (changes.autoSave && optAuto) optAuto.checked = changes.autoSave.newValue === true;
     }
   });
 

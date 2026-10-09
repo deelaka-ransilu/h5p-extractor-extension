@@ -60,10 +60,12 @@ async function imageUrlToDataUrl(url) {
   });
 }
 
+// Returns { blob, skipped }: skipped = how many slide images couldn't be loaded.
 async function buildSlidesPdf(urls, onProgress) {
   const { jsPDF } = window.jspdf;
   const pdf = new jsPDF({ unit: 'px', format: 'a4', orientation: 'landscape' });
   let first = true;
+  let skipped = 0;
 
   for (let i = 0; i < urls.length; i++) {
     try {
@@ -85,10 +87,11 @@ async function buildSlidesPdf(urls, onProgress) {
       pdf.addImage(dataUrl, 'PNG', (pageWidth - w) / 2, (pageHeight - h) / 2, w, h);
       first = false;
     } catch (e) {
+      skipped++;
       log(`  (skipped one image: ${e.message})`);
     }
     if (onProgress) onProgress(i + 1, urls.length);
   }
 
-  return pdf.output('blob');
+  return { blob: pdf.output('blob'), skipped };
 }

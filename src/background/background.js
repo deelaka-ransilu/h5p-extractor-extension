@@ -30,6 +30,14 @@ function openLibrary() {
 // Clicking the toolbar icon opens the library (there's no popup any more)
 chrome.action.onClicked.addListener(() => openLibrary());
 
+// autoSave switched off -> tell the offscreen document to drop PDF builds that are only waiting.
+// (Sent straight away, not via toOffscreen: no point creating the document just to clear a queue.)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'sync' && changes.autoSave && changes.autoSave.newValue !== true) {
+    chrome.runtime.sendMessage({ action: 'offscreen-clear-queue' }).catch(() => {});
+  }
+});
+
 // blob URL -> the filename we want for it
 const pendingNames = new Map();
 
